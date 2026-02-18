@@ -988,11 +988,7 @@
         onkeydown="if(event.key==='Enter')connectMcp()"
         oninput="clearSetupError()"
       />
-      <div class="setup-error" id="setupError"></div>
-    </div>
-
-   <div class="setup-field" id="orgField" style="display:none;">
-   <label class="setup-label" for="orgIdInput">Organization ID</label>
+     <label class="setup-label" for="orgIdInput">Organization ID</label>
        <input
          id="orgIdInput"
          class="setup-input"
@@ -1002,7 +998,10 @@
          spellcheck="false"
          onkeydown="if(event.key==='Enter')saveOrgId()"
        />
-   </div>
+      <div class="setup-error" id="setupError"></div>
+    </div>
+
+  
 
     <button class="setup-connect-btn" id="connectBtn" onclick="connectMcp()">
       <div class="setup-spinner" id="connectSpinner"></div>
@@ -1757,5 +1756,6 @@ document.getElementById('mcpUrlInput').focus();
 </body>
 
 </html>
+
 
 
