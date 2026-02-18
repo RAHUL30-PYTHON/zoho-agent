@@ -976,30 +976,35 @@
 
     <div class="setup-divider"></div>
 
-    <div class="setup-field">
-      <label class="setup-label" for="mcpUrlInput">MCP Server URL</label>
-      <input
-        id="mcpUrlInput"
-        class="setup-input"
-        type="url"
-        placeholder="https://your-mcp-server.com/mcp"
-        autocomplete="off"
-        spellcheck="false"
-        onkeydown="if(event.key==='Enter')connectMcp()"
-        oninput="clearSetupError()"
-      />
-     <label class="setup-label" for="orgIdInput">Organization ID</label>
-       <input
-         id="orgIdInput"
-         class="setup-input"
-         type="text"
-         placeholder="e.g. 60065733225"
-         autocomplete="off"
-         spellcheck="false"
-         onkeydown="if(event.key==='Enter')saveOrgId()"
-       />
-      <div class="setup-error" id="setupError"></div>
-    </div>
+   <div class="setup-field">
+  <label class="setup-label" for="mcpUrlInput">MCP Server URL</label>
+  <input
+    id="mcpUrlInput"
+    class="setup-input"
+    type="url"
+    placeholder="https://your-mcp-server.com/mcp"
+    autocomplete="off"
+    spellcheck="false"
+    onkeydown="if(event.key==='Enter')connectMcp()"
+    oninput="clearSetupError()"
+  />
+</div>
+
+<div class="setup-field" id="orgField" style="display:none;">
+  <label class="setup-label" for="orgIdInput">Organization ID</label>
+  <input
+    id="orgIdInput"
+    class="setup-input"
+    type="text"
+    placeholder="e.g. 60065733225"
+    autocomplete="off"
+    spellcheck="false"
+    onkeydown="if(event.key==='Enter')saveOrgId()"
+    oninput="clearSetupError()"
+  />
+</div>
+
+<div class="setup-error" id="setupError"></div>
 
   
 
@@ -1153,17 +1158,23 @@ const toolsBadge    = document.getElementById('toolsBadge');
 const connStatus    = document.getElementById('connectionStatus');
 
 // ── Setup modal logic ────────────────────────────────────────────
-function showSetupError(msg) {
+function showSetupError(msg, which = 'mcp') {
   const el = document.getElementById('setupError');
   el.textContent = msg;
   el.classList.add('show');
-  document.getElementById('mcpUrlInput').classList.add('error');
+
+  document.getElementById('mcpUrlInput').classList.remove('error');
+  document.getElementById('orgIdInput')?.classList.remove('error');
+
+  if (which === 'org') document.getElementById('orgIdInput')?.classList.add('error');
+  else document.getElementById('mcpUrlInput').classList.add('error');
 }
 
 function clearSetupError() {
   const el = document.getElementById('setupError');
   el.classList.remove('show');
   document.getElementById('mcpUrlInput').classList.remove('error');
+  document.getElementById('orgIdInput')?.classList.remove('error');
 }
 
 async function connectMcp() {
@@ -1226,7 +1237,7 @@ async function saveOrgId() {
   const org = (orgInput.value || '').trim();
 
   if (!/^\d{6,}$/.test(org)) {
-    showSetupError('Organization ID must be digits only (min 6).');
+    showSetupError('Organization ID must be digits only (min 6).', 'org');
     orgInput.focus();
     return;
   }
@@ -1243,7 +1254,7 @@ async function saveOrgId() {
 
   if (!r.ok) {
     const t = await r.text();
-    showSetupError(`Could not save org id: ${t}`);
+    showSetupError('Organization ID must be digits only (min 6).', 'org');
     return;
   }
 
@@ -1258,7 +1269,7 @@ async function saveOrgId() {
   inputBox.focus();
 }
  
-  // Show spinner
+  
   const btn     = document.getElementById('connectBtn');
   const spinner = document.getElementById('connectSpinner');
   const icon    = document.getElementById('connectIcon');
@@ -1756,6 +1767,7 @@ document.getElementById('mcpUrlInput').focus();
 </body>
 
 </html>
+
 
 
 
