@@ -991,6 +991,19 @@
       <div class="setup-error" id="setupError"></div>
     </div>
 
+   <div class="setup-field" id="orgField" style="display:none;">
+   <label class="setup-label" for="orgIdInput">Organization ID</label>
+       <input
+         id="orgIdInput"
+         class="setup-input"
+         type="text"
+         placeholder="e.g. 60065733225"
+         autocomplete="off"
+         spellcheck="false"
+         onkeydown="if(event.key==='Enter')saveOrgId()"
+       />
+   </div>
+
     <button class="setup-connect-btn" id="connectBtn" onclick="connectMcp()">
       <div class="setup-spinner" id="connectSpinner"></div>
       <svg id="connectIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
@@ -1126,6 +1139,7 @@ let mcpUrl      = null;   // set by connectMcp()
 let sessionId   = null;
 let isStreaming  = false;
 let history     = [];
+let mcpConnected = false;
 let orgId = null;
 
 // ── DOM refs ────────────────────────────────────────────────────
@@ -1154,29 +1168,95 @@ function clearSetupError() {
 }
 
 async function connectMcp() {
+  if (mcpConnected) return saveOrgId(); // second click = save org id
+
   const input = document.getElementById('mcpUrlInput');
   const url   = input.value.trim();
 
-  if (!url) {
-    showSetupError('MCP URL is required.');
-    input.focus();
-    return;
+  if (!url) { showSetupError('MCP URL is required.'); input.focus(); return; }
+  try { new URL(url); } catch { showSetupError('Please enter a valid URL (include https://).'); input.focus(); return; }
+
+  // spinner UI (keep your existing code)
+  const btn     = document.getElementById('connectBtn');
+  const spinner = document.getElementById('connectSpinner');
+  const icon    = document.getElementById('connectIcon');
+  const label   = document.getElementById('connectLabel');
+  btn.disabled = true;
+  spinner.style.display = 'block';
+  icon.style.display = 'none';
+  label.textContent = 'Connecting…';
+
+  try {
+    // ✅ This calls YOUR backend, which initializes MCP session = "authenticated"
+    const r = await fetch(`${API_BASE}/connect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mcp_url: url }),
+    });
+
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error(`Connect failed: ${t}`);
+    }
+
+    const d = await r.json();
+    mcpUrl = url;
+    sessionId = d.session_id;
+
+    // Update badges
+    document.getElementById('modelBadge').textContent = d.model || 'gemini';
+    toolsBadge.textContent = `${d.tools || 0} tools`;
+
+    // Now show org field
+    mcpConnected = true;
+    document.getElementById('orgField').style.display = 'flex';
+    document.getElementById('orgIdInput').focus();
+
+    // change button label to continue
+    label.textContent = 'Continue';
+  } catch (e) {
+    showSetupError(e.message || 'Could not connect to MCP.');
+  } finally {
+    btn.disabled = false;
+    spinner.style.display = 'none';
+    icon.style.display = 'block';
   }
-  try { new URL(url); } catch {
-    showSetupError('Please enter a valid URL (include https://).');
-    input.focus();
+}
+async function saveOrgId() {
+  const orgInput = document.getElementById('orgIdInput');
+  const org = (orgInput.value || '').trim();
+
+  if (!/^\d{6,}$/.test(org)) {
+    showSetupError('Organization ID must be digits only (min 6).');
+    orgInput.focus();
     return;
   }
 
-function askOrgId() {
-  const val = prompt("Enter Zoho Organization ID (digits only):");
-  if (!val) return false;
-  if (!/^\d{6,}$/.test(val.trim())) {
-    alert("Invalid Organization ID. It should be digits only.");
-    return askOrgId();
+  // store client-side for this browser session
+  orgId = org;
+
+  // store server-side in the session
+  const r = await fetch(`${API_BASE}/session/${sessionId}/org`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ organization_id: org }),
+  });
+
+  if (!r.ok) {
+    const t = await r.text();
+    showSetupError(`Could not save org id: ${t}`);
+    return;
   }
-  orgId = val.trim();
-  return true;
+
+  // Now reveal main UI
+  document.getElementById('setupOverlay').classList.add('hidden');
+  document.getElementById('shell').classList.add('visible');
+  document.getElementById('mcpUrlDisplay').textContent = truncateUrl(mcpUrl);
+  sessionDisp.textContent = sid6(sessionId);
+  connStatus.textContent = 'Connected';
+  connStatus.style.color = 'var(--accent)';
+
+  inputBox.focus();
 }
  
   // Show spinner
@@ -1677,4 +1757,5 @@ document.getElementById('mcpUrlInput').focus();
 </body>
 
 </html>
+
 
