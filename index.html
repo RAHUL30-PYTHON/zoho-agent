@@ -1126,6 +1126,7 @@ let mcpUrl      = null;   // set by connectMcp()
 let sessionId   = null;
 let isStreaming  = false;
 let history     = [];
+let orgId = null;
 
 // ── DOM refs ────────────────────────────────────────────────────
 const messagesEl    = document.getElementById('messagesEl');
@@ -1167,6 +1168,17 @@ async function connectMcp() {
     return;
   }
 
+function askOrgId() {
+  const val = prompt("Enter Zoho Organization ID (digits only):");
+  if (!val) return false;
+  if (!/^\d{6,}$/.test(val.trim())) {
+    alert("Invalid Organization ID. It should be digits only.");
+    return askOrgId();
+  }
+  orgId = val.trim();
+  return true;
+}
+ 
   // Show spinner
   const btn     = document.getElementById('connectBtn');
   const spinner = document.getElementById('connectSpinner');
@@ -1513,7 +1525,7 @@ async function resolveConfirm(answer) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       // mcp_url included so backend can look up session safely
-      body: JSON.stringify({ session_id: sessionId, answer, mcp_url: mcpUrl }),
+      body: JSON.stringify({ session_id: sessionId, answer, mcp_url: mcpUrl, organization_id: orgId }),
     });
     const data = await r.json();
     replaceBotMsg(data, data.tools_used, data.elapsed_ms);
@@ -1557,7 +1569,8 @@ async function streamChat(message) {
     body: JSON.stringify({
       message,
       session_id: sessionId || undefined,
-      mcp_url: mcpUrl,          // ← always included
+      mcp_url: mcpUrl,
+      organization_id: orgId// ← always included
     }),
   });
 
@@ -1642,7 +1655,7 @@ async function regularChat(message) {
   const r = await fetch(`${API_BASE}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, session_id: sessionId || undefined, mcp_url: mcpUrl }),
+    body: JSON.stringify({ message, session_id: sessionId || undefined, mcp_url: mcpUrl, organization_id: orgId }),
   });
   const data = await r.json();
   if (data.session_id) {
@@ -1664,3 +1677,4 @@ document.getElementById('mcpUrlInput').focus();
 </body>
 
 </html>
+
