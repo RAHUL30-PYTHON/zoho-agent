@@ -1118,8 +1118,7 @@
 
 <script>
 // ── Config ──────────────────────────────────────────────────────
-const API_BASE = 'http://localhost:8000';
-
+const API_BASE = window.location.origin;
 // ── Session state ───────────────────────────────────────────────
 // mcpUrl is stored here and sent with every request.
 // It is set once at connect time and lives for the browser session.
@@ -1663,4 +1662,5 @@ function hideEmpty() {
 document.getElementById('mcpUrlInput').focus();
 </script>
 </body>
+
 </html>
