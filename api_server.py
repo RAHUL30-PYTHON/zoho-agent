@@ -64,14 +64,12 @@ class ChatRequest(BaseModel):
     message:    str           = Field(..., min_length=1, max_length=4000)
     session_id: Optional[str] = Field(None, description="Omit to start a new session")
     mcp_url:    Optional[str] = Field(None, description="MCP server URL — required when starting a new session")
-    organization_id: Optional[str] = Field(None, description="Zoho org id (digits)")
 
 class ConfirmRequest(BaseModel):
     session_id: str
     answer:     bool  = Field(..., description="true = YES, false = NO")
     mcp_url:    Optional[str] = Field(None, description="MCP server URL (used only if session needs re-init)")
-    organization_id: Optional[str] = None
-    
+
 class ChatResponse(BaseModel):
     session_id:   str
     type:         str
@@ -90,16 +88,6 @@ class SessionInfo(BaseModel):
     pending_confirm: bool
     mcp_url:         str
 
-class ConnectRequest(BaseModel):
-    mcp_url: str = Field(..., min_length=5)
-
-class ConnectResponse(BaseModel):
-    session_id: str
-    tools: int
-    model: str
-
-class SetOrgRequest(BaseModel):
-    organization_id: str = Field(..., min_length=6, max_length=30)
 # ---------------------------------------------------------------------------
 # Session — now owns its own MCP connection + toolbox
 # ---------------------------------------------------------------------------
@@ -165,7 +153,7 @@ async def create_agent_session(
 
     return AgentSession(
         session_id   = session_id,
-        state = AgentState(organization_id=None),
+        state        = AgentState(organization_id=os.getenv("ZOHO_ORG_ID", "60065733225")),
         mcp_url      = mcp_url,
         mcp_session  = mcp_session,
         toolbox      = toolbox,
@@ -479,8 +467,6 @@ async def chat(req: ChatRequest) -> ChatResponse:
     t0   = time.monotonic()
     a    = _app()
     sess = await a.sessions.get_or_create(req.session_id, req.mcp_url, a.gemini)
-    if req.organization_id and not sess.state.organization_id:
-        sess.state.organization_id = str(req.organization_id).strip()
     cid  = uuid.uuid4().hex[:10]
     a.audit.write("user_message", msg=req.message, cid=cid, sid=sess.session_id)
 
@@ -500,17 +486,13 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
 @app.post("/confirm", response_model=ChatResponse)
 async def confirm(req: ConfirmRequest) -> ChatResponse:
-    t0 = time.monotonic()
-    a  = _app()
-    cid = uuid.uuid4().hex[:10]
-
+    t0   = time.monotonic()
+    a    = _app()
+    cid  = uuid.uuid4().hex[:10]
     sess = await a.sessions.get(req.session_id)
+
     if not sess:
         raise HTTPException(404, f"Session '{req.session_id}' not found or expired.")
-
-    if req.organization_id and not sess.state.organization_id:
-        sess.state.organization_id = str(req.organization_id).strip()
-
     if not sess.pending_confirm:
         raise HTTPException(400, "No pending confirmation for this session.")
 
@@ -547,8 +529,6 @@ async def confirm(req: ConfirmRequest) -> ChatResponse:
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
     a    = _app()
     sess = await a.sessions.get_or_create(req.session_id, req.mcp_url, a.gemini)
-    if req.organization_id and not sess.state.organization_id:
-        sess.state.organization_id = str(req.organization_id).strip()
     cid  = uuid.uuid4().hex[:10]
     a.audit.write("user_message_stream", msg=req.message, cid=cid, sid=sess.session_id)
 
@@ -686,29 +666,3 @@ async def delete_session(session_id: str) -> dict:
         raise HTTPException(404, "Session not found.")
 
     return {"deleted": session_id}
-
-
-@app.post("/connect", response_model=ConnectResponse)
-async def connect(req: ConnectRequest) -> ConnectResponse:
-    a = _app()
-    # Creates a new MCP session (this is your "MCP authenticated" moment)
-    sess = await a.sessions.get_or_create(session_id=None, mcp_url=req.mcp_url, gemini=a.gemini)
-    return ConnectResponse(session_id=sess.session_id, tools=len(sess.toolbox), model=MODEL)
-
-
-@app.post("/session/{session_id}/org")
-async def set_org(session_id: str, req: SetOrgRequest) -> dict:
-    sess = await _app().sessions.get(session_id)
-    if not sess:
-        raise HTTPException(404, "Session not found or expired.")
-
-    org = req.organization_id.strip()
-    if not re.fullmatch(r"\d{6,}", org):
-        raise HTTPException(400, "organization_id must be digits only (min 6).")
-
-    sess.state.organization_id = org
-    sess.touch()
-    return {"ok": True, "organization_id": org}
-
-
-
