@@ -880,8 +880,9 @@ def is_number_string(s: str) -> bool:
 def validate_env() -> None:
     missing = [k for k in REQUIRED_ENV_VARS if not os.getenv(k)]
     if missing:
-        _print(f"[bold red]Missing required environment variables: {', '.join(missing)}[/bold red]")
-        sys.exit(1)
+        raise RuntimeError(
+            "Missing required environment variables: " + ", ".join(missing)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1119,4 +1120,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+
     asyncio.run(main())
