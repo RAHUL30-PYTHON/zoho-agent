@@ -64,12 +64,14 @@ class ChatRequest(BaseModel):
     message:    str           = Field(..., min_length=1, max_length=4000)
     session_id: Optional[str] = Field(None, description="Omit to start a new session")
     mcp_url:    Optional[str] = Field(None, description="MCP server URL — required when starting a new session")
+    organization_id: Optional[str] = Field(None, description="Zoho org id (digits)")
 
 class ConfirmRequest(BaseModel):
     session_id: str
     answer:     bool  = Field(..., description="true = YES, false = NO")
     mcp_url:    Optional[str] = Field(None, description="MCP server URL (used only if session needs re-init)")
-
+    organization_id: Optional[str] = None
+    
 class ChatResponse(BaseModel):
     session_id:   str
     type:         str
@@ -153,7 +155,7 @@ async def create_agent_session(
 
     return AgentSession(
         session_id   = session_id,
-        state        = AgentState(organization_id=os.getenv("ZOHO_ORG_ID", "60065733225")),
+        state = AgentState(organization_id=None),
         mcp_url      = mcp_url,
         mcp_session  = mcp_session,
         toolbox      = toolbox,
@@ -467,6 +469,8 @@ async def chat(req: ChatRequest) -> ChatResponse:
     t0   = time.monotonic()
     a    = _app()
     sess = await a.sessions.get_or_create(req.session_id, req.mcp_url, a.gemini)
+    if req.organization_id and not sess.state.organization_id:
+        sess.state.organization_id = str(req.organization_id).strip()
     cid  = uuid.uuid4().hex[:10]
     a.audit.write("user_message", msg=req.message, cid=cid, sid=sess.session_id)
 
@@ -490,7 +494,8 @@ async def confirm(req: ConfirmRequest) -> ChatResponse:
     a    = _app()
     cid  = uuid.uuid4().hex[:10]
     sess = await a.sessions.get(req.session_id)
-
+    if req.organization_id and not sess.state.organization_id:
+        sess.state.organization_id = str(req.organization_id).strip()
     if not sess:
         raise HTTPException(404, f"Session '{req.session_id}' not found or expired.")
     if not sess.pending_confirm:
@@ -529,6 +534,8 @@ async def confirm(req: ConfirmRequest) -> ChatResponse:
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
     a    = _app()
     sess = await a.sessions.get_or_create(req.session_id, req.mcp_url, a.gemini)
+    if req.organization_id and not sess.state.organization_id:
+        sess.state.organization_id = str(req.organization_id).strip()
     cid  = uuid.uuid4().hex[:10]
     a.audit.write("user_message_stream", msg=req.message, cid=cid, sid=sess.session_id)
 
@@ -666,3 +673,4 @@ async def delete_session(session_id: str) -> dict:
         raise HTTPException(404, "Session not found.")
 
     return {"deleted": session_id}
+
