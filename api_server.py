@@ -500,14 +500,17 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
 @app.post("/confirm", response_model=ChatResponse)
 async def confirm(req: ConfirmRequest) -> ChatResponse:
-    t0   = time.monotonic()
-    a    = _app()
-    cid  = uuid.uuid4().hex[:10]
+    t0 = time.monotonic()
+    a  = _app()
+    cid = uuid.uuid4().hex[:10]
+
     sess = await a.sessions.get(req.session_id)
-    if req.organization_id and not sess.state.organization_id:
-        sess.state.organization_id = str(req.organization_id).strip()
     if not sess:
         raise HTTPException(404, f"Session '{req.session_id}' not found or expired.")
+
+    if req.organization_id and not sess.state.organization_id:
+        sess.state.organization_id = str(req.organization_id).strip()
+
     if not sess.pending_confirm:
         raise HTTPException(400, "No pending confirmation for this session.")
 
@@ -706,5 +709,6 @@ async def set_org(session_id: str, req: SetOrgRequest) -> dict:
     sess.state.organization_id = org
     sess.touch()
     return {"ok": True, "organization_id": org}
+
 
 
