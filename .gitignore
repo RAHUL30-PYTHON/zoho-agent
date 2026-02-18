@@ -1,0 +1,17 @@
+# Ignore all files ending with .log
+*.log
+
+# Ignore the entire 'build' directory and its contents
+build/
+
+# Ignore a specific file named 'config.json' in the root directory
+/config.json
+
+# Ignore system-specific files
+.DS_Store # macOS system files
+Thumbs.db # Windows system files
+
+# Ignore dependency caches
+node_modules/
+
+api.env
