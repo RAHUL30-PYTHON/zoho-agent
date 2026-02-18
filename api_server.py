@@ -64,6 +64,7 @@ class ChatRequest(BaseModel):
     message:    str           = Field(..., min_length=1, max_length=4000)
     session_id: Optional[str] = Field(None, description="Omit to start a new session")
     mcp_url:    Optional[str] = Field(None, description="MCP server URL — required when starting a new session")
+    org_id:     Optional[str] = Field(None, description="Zoho Organisation ID — required when starting a new session")
 
 class ConfirmRequest(BaseModel):
     session_id: str
@@ -89,7 +90,7 @@ class SessionInfo(BaseModel):
     mcp_url:         str
 
 # ---------------------------------------------------------------------------
-# Session — now owns its own MCP connection + toolbox
+# Session — owns its own MCP connection + toolbox
 # ---------------------------------------------------------------------------
 @dataclass
 class AgentSession:
@@ -102,7 +103,6 @@ class AgentSession:
     pending_confirm: Optional[dict] = None
     replan_attempts: int            = 0
     last_active:     float          = field(default_factory=time.monotonic)
-    # Keep references alive so GC doesn't kill them
     _http_client:    Any            = field(default=None, repr=False)
     _cm_http:        Any            = field(default=None, repr=False)
     _cm_stream:      Any            = field(default=None, repr=False)
@@ -115,7 +115,6 @@ class AgentSession:
         return (time.monotonic() - self.last_active) > SESSION_TTL_MINUTES * 60
 
     async def close(self) -> None:
-        """Tear down the MCP connection for this session."""
         for cm in (self._cm_mcp, self._cm_stream, self._cm_http):
             try:
                 if cm is not None:
@@ -125,12 +124,13 @@ class AgentSession:
 
 
 # ---------------------------------------------------------------------------
-# Session factory — opens a dedicated MCP connection per session
+# Session factory — org_id now comes from the caller, not env
 # ---------------------------------------------------------------------------
 async def create_agent_session(
     session_id: str,
     mcp_url: str,
     gemini: genai.Client,
+    org_id: Optional[str] = None,
 ) -> AgentSession:
     zoho_bearer = os.getenv("ZOHO_MCP_BEARER")
     headers     = {"Authorization": f"Bearer {zoho_bearer}"} if zoho_bearer else {}
@@ -153,7 +153,8 @@ async def create_agent_session(
 
     return AgentSession(
         session_id   = session_id,
-        state        = AgentState(organization_id=os.getenv("ZOHO_ORG_ID", "60065733225")),
+        # org_id from request takes priority; no hardcoded default
+        state        = AgentState(organization_id=org_id or None),
         mcp_url      = mcp_url,
         mcp_session  = mcp_session,
         toolbox      = toolbox,
@@ -177,11 +178,12 @@ class SessionStore:
         session_id: Optional[str],
         mcp_url: Optional[str],
         gemini: genai.Client,
+        org_id: Optional[str] = None,
     ) -> AgentSession:
         async with self._lock:
             self._evict_expired_sync()
 
-            # Return existing session (mcp_url ignored — already connected)
+            # Return existing session (mcp_url / org_id ignored — already set)
             if session_id and session_id in self._sessions:
                 s = self._sessions[session_id]
                 s.touch()
@@ -190,14 +192,16 @@ class SessionStore:
             # New session — mcp_url is required
             if not mcp_url:
                 raise HTTPException(400, "mcp_url is required to start a new session.")
+            if not org_id:
+                raise HTTPException(400, "org_id is required to start a new session.")
 
             if len(self._sessions) >= MAX_SESSIONS:
                 raise HTTPException(503, "Too many active sessions — try again later.")
 
             sid = session_id or uuid.uuid4().hex
-            sess = await create_agent_session(sid, mcp_url, gemini)
+            sess = await create_agent_session(sid, mcp_url, gemini, org_id=org_id)
             self._sessions[sid] = sess
-            log.info("session_created", extra={"sid": sid})
+            log.info("session_created", extra={"sid": sid, "org_id": org_id})
             return sess
 
     async def get(self, session_id: str) -> Optional[AgentSession]:
@@ -227,7 +231,7 @@ class SessionStore:
 
 
 # ---------------------------------------------------------------------------
-# App-level singletons (no longer holds a shared MCP session)
+# App-level singletons
 # ---------------------------------------------------------------------------
 @dataclass
 class _App:
@@ -246,7 +250,7 @@ def _app() -> _App:
 
 
 # ---------------------------------------------------------------------------
-# Summarizer — returns structured dict (no terminal rendering)
+# Summarizer
 # ---------------------------------------------------------------------------
 async def api_summarize(
     gemini: genai.Client,
@@ -310,7 +314,7 @@ def structured_to_markdown(data: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Core turn logic — session now carries its own mcp_session + toolbox
+# Core turn logic
 # ---------------------------------------------------------------------------
 async def _run_plan(sess: AgentSession, plan: dict, cid: str) -> dict:
     a     = _app()
@@ -352,7 +356,6 @@ async def _run_plan(sess: AgentSession, plan: dict, cid: str) -> dict:
                 "confirm_text": f"This involves sensitive operations: {names}. Confirm to proceed?",
                 "reply": None, "structured": None, "tools_used": []}
 
-    # Use the session's own mcp_session and toolbox
     ok, last_result = await execute_plan(
         sess.mcp_session, sess.toolbox, sess.state,
         sess.memory, a.audit, a.gemini, steps, cid,
@@ -401,7 +404,7 @@ async def process_turn(sess: AgentSession, message: str, cid: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Lifespan — no shared MCP connection anymore
+# Lifespan
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -434,8 +437,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Zoho Books Agent API",
-    version="2.0.0",
-    description="AI-powered Zoho Books assistant (Gemini + MCP, per-session MCP URL)",
+    version="2.1.0",
+    description="AI-powered Zoho Books assistant (Gemini + MCP, per-session MCP URL + Org ID)",
     lifespan=lifespan,
 )
 
@@ -466,7 +469,9 @@ async def health() -> dict:
 async def chat(req: ChatRequest) -> ChatResponse:
     t0   = time.monotonic()
     a    = _app()
-    sess = await a.sessions.get_or_create(req.session_id, req.mcp_url, a.gemini)
+    sess = await a.sessions.get_or_create(
+        req.session_id, req.mcp_url, a.gemini, org_id=req.org_id
+    )
     cid  = uuid.uuid4().hex[:10]
     a.audit.write("user_message", msg=req.message, cid=cid, sid=sess.session_id)
 
@@ -528,7 +533,9 @@ async def confirm(req: ConfirmRequest) -> ChatResponse:
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
     a    = _app()
-    sess = await a.sessions.get_or_create(req.session_id, req.mcp_url, a.gemini)
+    sess = await a.sessions.get_or_create(
+        req.session_id, req.mcp_url, a.gemini, org_id=req.org_id
+    )
     cid  = uuid.uuid4().hex[:10]
     a.audit.write("user_message_stream", msg=req.message, cid=cid, sid=sess.session_id)
 
@@ -579,7 +586,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                            "session_id": sess.session_id})
                 return
 
-            # Use session's own mcp_session and toolbox
             ok, last_result = await execute_plan(
                 sess.mcp_session, sess.toolbox, sess.state,
                 sess.memory, a.audit, a.gemini, steps, cid,
@@ -664,5 +670,4 @@ async def get_session(session_id: str) -> SessionInfo:
 async def delete_session(session_id: str) -> dict:
     if not await _app().sessions.delete(session_id):
         raise HTTPException(404, "Session not found.")
-
     return {"deleted": session_id}
