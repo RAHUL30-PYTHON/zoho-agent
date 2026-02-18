@@ -1,12 +1,18 @@
 {
   "version": 2,
-  "builds": [{ "src": "api_server.py", "use": "@vercel/python" }],
+  "builds": [
+    { "src": "api_server.py", "use": "@vercel/python" },
+    { "src": "index.html", "use": "@vercel/static" }
+  ],
   "routes": [
     { "handle": "filesystem" },
+
     { "src": "^/$", "dest": "/index.html" },
-    {
-      "src": "^/(health|chat|confirm|chat/stream|session/.*|docs|redoc|openapi\\.json)$",
-      "dest": "api_server.py"
-    }
+
+    { "src": "^/(docs|redoc|openapi\\.json|health)$", "dest": "api_server.py" },
+    { "src": "^/chat$", "dest": "api_server.py" },
+    { "src": "^/confirm$", "dest": "api_server.py" },
+    { "src": "^/chat/stream$", "dest": "api_server.py" },
+    { "src": "^/session/.*$", "dest": "api_server.py" }
   ]
 }
