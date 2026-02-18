@@ -6,7 +6,7 @@
       "use": "@vercel/python"
     }
   ],
-  "routes": [
+  "rewrites": [
     {
       "source": "/(.*)",
       "destination": "api_server.py"
