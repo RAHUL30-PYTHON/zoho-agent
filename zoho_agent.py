@@ -892,6 +892,7 @@ async def main() -> None:
     validate_env()
 
     gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
     zoho_url = ""
     while not zoho_url:
         zoho_url = (await asyncio.get_event_loop().run_in_executor(
@@ -899,14 +900,28 @@ async def main() -> None:
         )).strip()
         if not zoho_url:
             _print("[yellow]MCP URL cannot be empty.[/yellow]")
+
     zoho_bearer: Optional[str] = os.getenv("ZOHO_MCP_BEARER")
-    default_org_id: Optional[str] = os.getenv("ZOHO_ORG_ID", "60065733225")
 
     headers: dict[str, str] = {}
     if zoho_bearer:
         headers["Authorization"] = f"Bearer {zoho_bearer}"
 
+    # ── Org ID: read from env or prompt interactively ──────────────
+    default_org_id: Optional[str] = os.getenv("ZOHO_ORG_ID") or None
     state = AgentState(organization_id=default_org_id)
+
+    if not state.organization_id:
+        while True:
+            oid = (await asyncio.get_event_loop().run_in_executor(
+                None, input, "Enter Zoho Organisation ID: "
+            )).strip()
+            if re.fullmatch(r"\d{4,}", oid):
+                state.organization_id = oid
+                break
+            _print("[yellow]Organisation ID must be numeric (e.g. 60065733225).[/yellow]")
+    # ──────────────────────────────────────────────────────────────
+
     memory: list[dict] = []
     audit = AuditLog(AUDIT_LOG_PATH)
     pending_confirm: Optional[dict] = None
@@ -921,7 +936,7 @@ async def main() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    log.info("agent_starting", extra={"model": MODEL, "org_id": default_org_id})
+    log.info("agent_starting", extra={"model": MODEL, "org_id": state.organization_id})
 
     async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(TOOL_TIMEOUT + 10)) as http_client:
         async with streamable_http_client(zoho_url, http_client=http_client) as (read, write, _):
@@ -935,7 +950,6 @@ async def main() -> None:
                 _print("  [dim]Type 'quit' to exit | 'tools' to list available tools | 'memory' to inspect context[/dim]\n")
 
                 while not shutdown_event.is_set():
-                    # Async-friendly input
                     try:
                         user_msg = await asyncio.get_event_loop().run_in_executor(None, input, "You: ")
                     except EOFError:
@@ -945,7 +959,6 @@ async def main() -> None:
                     if not user_msg:
                         continue
 
-                    # Built-in commands
                     if user_msg.lower() in {"quit", "exit", "q"}:
                         break
 
@@ -969,14 +982,13 @@ async def main() -> None:
                         _print("")
                         continue
 
-                    # Bare org ID shortcut
+                    # Bare org ID shortcut (in case user pastes one mid-session)
                     if is_number_string(user_msg) and not state.organization_id:
                         state.organization_id = user_msg
                         _print(f"[green]Assistant:[/green] Organization ID saved: {user_msg}. What would you like to do?\n")
                         audit.write("org_id_set", org_id=user_msg)
                         continue
 
-                    # New correlation ID per user turn
                     cid = uuid.uuid4().hex[:10]
                     audit.write("user_message", msg=user_msg, cid=cid)
                     log.info("user_turn", extra={"cid": cid, "msg_len": len(user_msg)})
@@ -1034,7 +1046,6 @@ async def main() -> None:
                         _print("[green]Assistant:[/green] Plan had no steps. Please rephrase.\n")
                         continue
 
-                    # Risky check before any execution
                     risky_steps = [s for s in steps if is_risky(s.get("tool", ""))]
                     if risky_steps and not pending_confirm:
                         risky_names = ", ".join(s["tool"] for s in risky_steps)
@@ -1049,7 +1060,6 @@ async def main() -> None:
                         audit.write("risky_confirm_requested", tools=risky_names, cid=cid)
                         continue
 
-                    # Execute
                     _print("[dim]Assistant: Working…[/dim]")
                     ok, last_result = await execute_plan(
                         session, toolbox, state, memory, audit, gemini, steps, cid
@@ -1120,5 +1130,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-
     asyncio.run(main())
