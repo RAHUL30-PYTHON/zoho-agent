@@ -392,7 +392,7 @@ INPUT (JSON):
 RULES:
 1. NEVER invent or guess IDs. Look them up with list/get tools first if not in STATE or MEMORY.
 2. Only use argument keys present in a tool's "allowed" list.
-3. STATE.organization_id is always set — inject it automatically; never ask for it.
+3. If STATE.organization_id is missing, ask the user for it (numeric Zoho org id) before calling tools that require it.
 4. For body/JSONString fields, pass valid JSON constructed from context.
 5. When collecting missing fields for a multi-step operation, do NOT call any tool — only ask.
 6. When MEMORY contains a schema_error, fix the tool call using only allowed keys.
@@ -1122,3 +1122,4 @@ async def main() -> None:
 if __name__ == "__main__":
 
     asyncio.run(main())
+
