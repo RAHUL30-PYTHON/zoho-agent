@@ -90,6 +90,16 @@ class SessionInfo(BaseModel):
     pending_confirm: bool
     mcp_url:         str
 
+class ConnectRequest(BaseModel):
+    mcp_url: str = Field(..., min_length=5)
+
+class ConnectResponse(BaseModel):
+    session_id: str
+    tools: int
+    model: str
+
+class SetOrgRequest(BaseModel):
+    organization_id: str = Field(..., min_length=6, max_length=30)
 # ---------------------------------------------------------------------------
 # Session — now owns its own MCP connection + toolbox
 # ---------------------------------------------------------------------------
@@ -673,4 +683,28 @@ async def delete_session(session_id: str) -> dict:
         raise HTTPException(404, "Session not found.")
 
     return {"deleted": session_id}
+
+
+@app.post("/connect", response_model=ConnectResponse)
+async def connect(req: ConnectRequest) -> ConnectResponse:
+    a = _app()
+    # Creates a new MCP session (this is your "MCP authenticated" moment)
+    sess = await a.sessions.get_or_create(session_id=None, mcp_url=req.mcp_url, gemini=a.gemini)
+    return ConnectResponse(session_id=sess.session_id, tools=len(sess.toolbox), model=MODEL)
+
+
+@app.post("/session/{session_id}/org")
+async def set_org(session_id: str, req: SetOrgRequest) -> dict:
+    sess = await _app().sessions.get(session_id)
+    if not sess:
+        raise HTTPException(404, "Session not found or expired.")
+
+    org = req.organization_id.strip()
+    if not re.fullmatch(r"\d{6,}", org):
+        raise HTTPException(400, "organization_id must be digits only (min 6).")
+
+    sess.state.organization_id = org
+    sess.touch()
+    return {"ok": True, "organization_id": org}
+
 
