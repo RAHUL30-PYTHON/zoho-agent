@@ -21,7 +21,10 @@ from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types as gtypes
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+try:
+    from mcp.client.streamable_http import streamable_http_client
+except ImportError:
+    from mcp.client.streamable_http import streamablehttp_client as streamable_http_client
 
 from zoho_agent import (
     AgentState,
@@ -661,4 +664,5 @@ async def get_session(session_id: str) -> SessionInfo:
 async def delete_session(session_id: str) -> dict:
     if not await _app().sessions.delete(session_id):
         raise HTTPException(404, "Session not found.")
+
     return {"deleted": session_id}
