@@ -15,10 +15,5 @@
     { "src": "^/chat/stream$", "dest": "api_server.py" },
     { "src": "^/session/.*$", "dest": "api_server.py" },
     { "src": "/favicon.ico", "dest": "api_server.py" }
-  ],
-  "functions": {
-    "api_server.py": {
-      "includeFiles": "favicon.ico"
-    }
-  }
+  ]
 }
