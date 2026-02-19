@@ -57,9 +57,9 @@ MODEL: str                   = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview
 # Optionally use a faster model just for planning (e.g. gemini-1.5-flash-8b or gemini-2.0-flash)
 # Summarizer always uses MODEL since it needs to handle large outputs
 PLANNER_MODEL: str           = os.getenv("GEMINI_PLANNER_MODEL", MODEL)
-MAX_MEMORY_TOKENS: int       = int(os.getenv("MAX_MEMORY_TOKENS", "24000"))
-MAX_MEMORY_ENTRIES: int      = int(os.getenv("MAX_MEMORY_ENTRIES", "60"))
-MEMORY_SUMMARIZE_THRESHOLD   = int(os.getenv("MEMORY_SUMMARIZE_THRESHOLD", "45"))
+MAX_MEMORY_TOKENS: int       = int(os.getenv("MAX_MEMORY_TOKENS", "30000"))
+MAX_MEMORY_ENTRIES: int      = int(os.getenv("MAX_MEMORY_ENTRIES", "90"))
+MEMORY_SUMMARIZE_THRESHOLD   = int(os.getenv("MEMORY_SUMMARIZE_THRESHOLD", "60"))
 MAX_TOOL_PROPS: int          = int(os.getenv("MAX_TOOL_PROPS", "60"))
 MAX_REPLAN_ATTEMPTS: int     = int(os.getenv("MAX_REPLAN_ATTEMPTS", "3"))
 AUDIT_LOG_PATH: str          = os.getenv("AUDIT_LOG_PATH", "audit.jsonl")
@@ -1275,5 +1275,6 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
