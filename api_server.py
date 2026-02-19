@@ -573,10 +573,12 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                            "session_id": sess.session_id, "tools_used": []})
                 return
 
+            t_plan_start = time.monotonic()
             raw   = await gemini_plan(a.gemini, sess.toolbox, sess.state, sess.memory, req.message, cid)
             plan  = normalize_plan(raw)
             ptype = plan.get("type")
             sess.replan_attempts = 0
+            log.info("plan_latency", extra={"cid": cid, "ms": int((time.monotonic()-t_plan_start)*1000), "type": ptype})
 
             if ptype == "ask":
                 sess.state.update_from_dict(plan.get("save") or {})
@@ -607,11 +609,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                            "session_id": sess.session_id})
                 return
 
+            t_exec_start = time.monotonic()
             ok, last_result = await execute_plan(
                 sess.mcp_session, sess.toolbox, sess.state,
                 sess.memory, a.audit, a.gemini, steps, cid,
             )
             tools_used = [s.get("tool", "") for s in steps]
+            log.info("exec_latency", extra={"cid": cid, "ms": int((time.monotonic()-t_exec_start)*1000), "tools": tools_used})
 
             if not ok or last_result is None:
                 yield sse({"type": "error", "message": "Execution failed.",
@@ -647,6 +651,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     full_json += chunk.text or ""
                 return full_json
 
+            t_summ_start = time.monotonic()
             try:
                 await asyncio.wait_for(_collect_stream(), timeout=stream_timeout)
             except asyncio.TimeoutError:
@@ -661,6 +666,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         "headline": f"{last_tool} completed (response timed out — try asking for a smaller set).",
                     })
 
+            log.info("summarize_latency", extra={"cid": cid, "ms": int((time.monotonic()-t_summ_start)*1000), "chars": len(full_json)})
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", full_json.strip(), flags=re.MULTILINE).strip()
             try:
                 structured = json.loads(cleaned)
@@ -668,10 +674,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 structured = {"format": "status", "ok": True, "headline": cleaned or "Done."}
 
             reply_md = structured_to_markdown(structured)
-            words = reply_md.split(" ")
-            for i, word in enumerate(words):
-                yield sse({"type": "token", "token": ("" if i == 0 else " ") + word})
-                await asyncio.sleep(0)
+            # Emit in chunks of ~80 chars for a smooth but fast stream
+            # Word-by-word with asyncio.sleep(0) per word is far too slow
+            CHUNK = 80
+            for i in range(0, len(reply_md), CHUNK):
+                yield sse({"type": "token", "token": reply_md[i:i + CHUNK]})
+                if i % (CHUNK * 8) == 0:          # yield control every ~640 chars
+                    await asyncio.sleep(0)
 
             sess.state.clear_workflow()
             sess.touch()
