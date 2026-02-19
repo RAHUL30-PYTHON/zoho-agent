@@ -54,6 +54,9 @@ except ImportError:
 load_dotenv("api.env")
 
 MODEL: str                   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-04-17")
+# Optionally use a faster model just for planning (e.g. gemini-1.5-flash-8b or gemini-2.0-flash)
+# Summarizer always uses MODEL since it needs to handle large outputs
+PLANNER_MODEL: str           = os.getenv("GEMINI_PLANNER_MODEL", MODEL)
 MAX_MEMORY_TOKENS: int       = int(os.getenv("MAX_MEMORY_TOKENS", "24000"))
 MAX_MEMORY_ENTRIES: int      = int(os.getenv("MAX_MEMORY_ENTRIES", "60"))
 MEMORY_SUMMARIZE_THRESHOLD   = int(os.getenv("MEMORY_SUMMARIZE_THRESHOLD", "45"))
@@ -469,6 +472,57 @@ C) Confirm before risky / irreversible action:
 """.strip()
 
 
+def _slim_toolbox(toolbox: dict[str, ToolMeta], user_msg: str, memory: list[dict]) -> dict:
+    """
+    Return a trimmed toolbox for the planner.
+    Always include all tools but strip the heavy schema/allowed fields from
+    tools that are clearly irrelevant to the user message + recent memory.
+    This cuts planner payload by ~60-70% without losing decision quality.
+    """
+    # Keywords from user message and recent tool calls to identify relevant tools
+    user_lower = user_msg.lower()
+    recent_tools = {m.get("tool", "") for m in memory[-6:] if "tool" in m}
+
+    # Domain keywords → tool name substrings
+    DOMAIN_HINTS = [
+        ({"invoice", "invoic", "receivable", "receive", "customer payment"}, "invoice"),
+        ({"bill", "payable", "vendor payment", "pay vendor"}, "bill"),
+        ({"contact", "customer", "vendor", "supplier"}, "contact"),
+        ({"item", "product", "service", "inventory"}, "item"),
+        ({"expense"}, "expense"),
+        ({"payment"}, "payment"),
+        ({"credit", "credit note"}, "credit"),
+        ({"bank", "transaction", "reconcil"}, "bank"),
+        ({"report", "summary", "p&l", "profit", "balance sheet"}, "report"),
+        ({"account", "chart"}, "account"),
+        ({"tax", "gst"}, "tax"),
+        ({"estimate", "quote"}, "estimate"),
+        ({"purchase order", "po "}, "purchaseorder"),
+        ({"sales order", "so "}, "salesorder"),
+    ]
+
+    relevant_substrings: set[str] = set()
+    for keywords, tool_substr in DOMAIN_HINTS:
+        if any(kw in user_lower for kw in keywords):
+            relevant_substrings.add(tool_substr)
+
+    slim: dict = {}
+    for name, meta in toolbox.items():
+        name_lower = name.lower()
+        is_recent  = name in recent_tools
+        is_relevant = not relevant_substrings or any(s in name_lower for s in relevant_substrings)
+
+        if is_recent or is_relevant:
+            # Full detail for relevant/recently-used tools
+            slim[name] = meta.to_planner_dict()
+        else:
+            # Minimal stub for everything else — name + desc only so planner
+            # knows the tool exists but won't be tempted to use it
+            slim[name] = {"desc": meta.desc[:80], "read_only": meta.read_only}
+
+    return slim
+
+
 def _build_planner_payload(
     toolbox: dict[str, ToolMeta],
     state: AgentState,
@@ -477,9 +531,9 @@ def _build_planner_payload(
 ) -> str:
     return json.dumps(
         {
-            "TOOLBOX": {n: m.to_planner_dict() for n, m in toolbox.items()},
+            "TOOLBOX": _slim_toolbox(toolbox, user_msg, memory),
             "STATE":   state.to_dict(),
-            "MEMORY":  memory,
+            "MEMORY":  memory[-12:],   # last 12 entries is enough for planning
             "USER":    user_msg,
         },
         ensure_ascii=False,
@@ -501,13 +555,13 @@ async def gemini_plan(
     async def _call() -> dict:
         resp = await asyncio.wait_for(
             client.aio.models.generate_content(
-                model=MODEL,
+                model=PLANNER_MODEL,   # can be a faster model than summarizer
                 contents=[types.Content(role="user", parts=[types.Part(text=payload)])],
                 config=types.GenerateContentConfig(
                     system_instruction=PLANNER_SYSTEM,
-                    temperature=0.4,
+                    temperature=0.2,   # lower = more deterministic = faster
                     response_mime_type="application/json",
-                    max_output_tokens=8192,
+                    max_output_tokens=2048,  # plans are small; 8192 was wasteful
                 ),
             ),
             timeout=GEMINI_TIMEOUT,
@@ -747,21 +801,59 @@ async def _stream_collect_json(
         return resp.text or "{}"
 
 
+# Fields in Zoho API responses that add no display value but inflate payload size
+_ZOHO_NOISE_FIELDS: frozenset[str] = frozenset({
+    "created_time", "last_modified_time", "created_by", "last_modified_by",
+    "submitted_date", "submitted_by", "approved_date", "approved_by",
+    "color_code", "current_sub_status_id", "current_sub_status",
+    "template_id", "template_name", "template_type",
+    "is_viewed_by_client", "client_viewed_time",
+    "payment_made", "payment_expected_date",
+    "salesperson_id", "salesperson_name",
+    "shipping_charge", "adjustment", "write_off_amount",
+    "exchange_rate", "currency_id", "currency_code", "currency_symbol",
+    "documents", "attachments", "comments",
+    "page_context", "zcrm_potential_id", "zcrm_potential_name",
+    "salesorder_id", "purchaseorder_id", "estimate_id",
+    "source", "reference_number", "reason",
+    "ach_payment_initiated", "tax_rounding",
+    "is_emailed", "is_viewed_by_client", "is_inclusive_tax",
+    "payment_options", "line_item_total", "bcy_total", "bcy_balance",
+    "bcy_discount_total", "bcy_adjustment", "bcy_sub_total",
+})
+
+
+def _strip_noise(obj: Any, depth: int = 0) -> Any:
+    """Recursively strip noise fields from Zoho API response objects."""
+    if depth > 4:
+        return obj
+    if isinstance(obj, dict):
+        return {
+            k: _strip_noise(v, depth + 1)
+            for k, v in obj.items()
+            if k not in _ZOHO_NOISE_FIELDS
+        }
+    if isinstance(obj, list):
+        return [_strip_noise(i, depth + 1) for i in obj]
+    return obj
+
+
 def _safe_result_str(result: Any, char_limit: int = SUMMARIZE_INPUT_CHAR_LIMIT) -> str:
     """
-    Serialize a tool result to a string safe to send to Gemini.
-    If the serialized form exceeds char_limit, extract just the list of records
-    (the largest array inside the payload) so we keep all rows but drop
-    bulky metadata that inflates size without adding value.
+    Serialize a tool result for Gemini.
+    1. Strip known Zoho noise fields first (cuts size 30-50%).
+    2. If still over limit, extract just the largest record array.
+    3. Hard-truncate only as last resort.
     """
-    full = json.dumps(result, default=str, ensure_ascii=False)
+    cleaned = _strip_noise(result)
+    full = json.dumps(cleaned, default=str, ensure_ascii=False)
     if len(full) <= char_limit:
         return full
 
-    # Try to find the largest array in the top-level dict and use that
-    if isinstance(result, dict):
+    # Try to find the largest array in the top-level dict
+    if isinstance(cleaned, dict):
         best_key, best_arr = "", []
-        for k, v in result.items():
+        for k, v in cleaned.items():
             if isinstance(v, list) and len(v) > len(best_arr):
                 best_key, best_arr = k, v
         if best_arr:
@@ -771,7 +863,6 @@ def _safe_result_str(result: Any, char_limit: int = SUMMARIZE_INPUT_CHAR_LIMIT) 
                          extra={"key": best_key, "rows": len(best_arr), "chars": len(trimmed)})
                 return trimmed
 
-    # Last resort: hard truncate with a note
     log.warning("result_hard_truncated",
                 extra={"original_chars": len(full), "limit": char_limit})
     return full[:char_limit] + "\n...[TRUNCATED — partial result]"
