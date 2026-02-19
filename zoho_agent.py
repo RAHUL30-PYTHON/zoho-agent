@@ -76,7 +76,7 @@ MEMORY_SUMMARIZE_THRESHOLD: int = int(os.getenv("MEMORY_SUMMARIZE_THRESHOLD", "4
 MAX_TOOL_PROPS: int = int(os.getenv("MAX_TOOL_PROPS", "60"))
 MAX_REPLAN_ATTEMPTS: int = int(os.getenv("MAX_REPLAN_ATTEMPTS", "3"))
 AUDIT_LOG_PATH: str = os.getenv("AUDIT_LOG_PATH", "audit.jsonl")
-LOG_LEVEL: str = os.getenv("LOG_LEVEL", "WARNING")
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 TOOL_TIMEOUT: float = float(os.getenv("TOOL_TIMEOUT_SECONDS", "30"))
 GEMINI_TIMEOUT: float = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "45"))
 CIRCUIT_BREAK_THRESHOLD: int = int(os.getenv("CIRCUIT_BREAK_THRESHOLD", "3"))
@@ -87,15 +87,29 @@ REQUIRED_ENV_VARS = ["GEMINI_API_KEY"]
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+_LOG_RECORD_BUILTINS = frozenset({
+    "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
+    "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+    "created", "msecs", "relativeCreated", "thread", "threadName",
+    "processName", "process", "message", "taskName",
+})
+
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        # Python's logging puts extra= kwargs directly on the record as
+        # top-level attributes — NOT nested under an "extra" key.
+        # Collect any non-builtin attributes as structured context.
+        extra = {
+            k: v for k, v in record.__dict__.items()
+            if k not in _LOG_RECORD_BUILTINS and not k.startswith("_")
+        }
         return json.dumps({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "level": record.levelname,
-            "msg": record.getMessage(),
+            "ts":     datetime.now(timezone.utc).isoformat(),
+            "level":  record.levelname,
+            "msg":    record.getMessage(),
             "logger": record.name,
-            **getattr(record, "extra", {}),
-        })
+            **extra,
+        }, default=str)
 
 def _setup_logging() -> logging.Logger:
     handler = logging.StreamHandler(sys.stderr)
@@ -723,30 +737,35 @@ def _render_structured(data: dict) -> str:
 
 
 async def _stream_collect_json(client: genai.Client, prompt: str, system: str, cid: str) -> str:
-    """Stream JSON tokens from Gemini, show a subtle indicator, return full text."""
+    """Stream JSON tokens from Gemini, collect into a single string and return."""
     full = ""
-    started = False
-    try:
-        async with asyncio.timeout(GEMINI_TIMEOUT):
-            async for chunk in await client.aio.models.generate_content_stream(
-                model=MODEL,
-                contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    temperature=0.1,
-                    response_mime_type="application/json",
-                    max_output_tokens=65536,  # large tables need headroom
-                ),
-            ):
-                token = chunk.text or ""
-                if not token:
-                    continue
-                if not started:
-                    started = True
-                full += token
+    # Use a generous timeout — large result sets (200+ rows) can take >45s to emit
+    timeout = max(GEMINI_TIMEOUT, 120.0)
+
+    async def _collect() -> str:
+        nonlocal full
+        async for chunk in await client.aio.models.generate_content_stream(
+            model=MODEL,
+            contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=0.1,
+                response_mime_type="application/json",
+                max_output_tokens=65536,  # large tables need headroom
+            ),
+        ):
+            full += chunk.text or ""
         return full
+
+    try:
+        return await asyncio.wait_for(_collect(), timeout=timeout)
     except Exception as exc:
-        log.warning("stream_collect_failed", extra={"cid": cid, "error": str(exc)})
+        log.warning("stream_collect_failed", extra={"cid": cid, "error": str(exc), "collected_chars": len(full)})
+        # If we already collected a partial response that looks complete, use it
+        if full.strip().endswith("}") or full.strip().endswith("]"):
+            log.info("stream_collect_using_partial", extra={"cid": cid, "chars": len(full)})
+            return full
+        # Otherwise fall back to a non-streaming call
         resp = await asyncio.wait_for(
             client.aio.models.generate_content(
                 model=MODEL,
@@ -758,7 +777,7 @@ async def _stream_collect_json(client: genai.Client, prompt: str, system: str, c
                     max_output_tokens=65536,
                 ),
             ),
-            timeout=GEMINI_TIMEOUT,
+            timeout=timeout,
         )
         return resp.text or "{}"
 
