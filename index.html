@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Zoho Books AI</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <style>
@@ -201,16 +200,21 @@
   .msg-bubble { padding: 13px 16px; border-radius: var(--radius); font-size: 14px; line-height: 1.7; max-width: 100%; }
   .msg.user .msg-bubble { background: var(--user-bg); border: 1px solid var(--user-border); border-radius: var(--radius) var(--radius) 4px var(--radius); color: var(--text); font-family: var(--font-mono); font-size: 13.5px; }
   .msg.bot  .msg-bubble { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius) var(--radius) var(--radius) 4px; color: var(--text); }
+  .msg.bot  .msg-bubble.has-table { padding: 10px 10px 10px 12px; }
   .msg-bubble h3 { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); letter-spacing: .04em; text-transform: uppercase; }
   .msg-bubble p { margin-bottom: 8px; color: var(--text-2); font-size: 13.5px; }
   .msg-bubble p:last-child { margin-bottom: 0; }
   .msg-bubble strong { color: var(--text); font-weight: 600; }
   .msg-bubble em { color: var(--text-2); font-style: italic; }
   .msg-bubble code { font-family: var(--font-mono); font-size: 12px; background: var(--surface2); border: 1px solid var(--border-hi); padding: 1px 5px; border-radius: 4px; color: var(--accent); }
-  .msg-bubble table { width: 100%; border-collapse: collapse; font-size: 12.5px; font-family: var(--font-mono); margin: 4px 0; }
+  .table-scroll { overflow-x: auto; overflow-y: visible; margin: 6px -4px; border-radius: var(--radius-sm); scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  .table-scroll::-webkit-scrollbar { height: 4px; }
+  .table-scroll::-webkit-scrollbar-track { background: transparent; }
+  .table-scroll::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 4px; }
+  .msg-bubble table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 11.5px; font-family: var(--font-mono); }
   .msg-bubble thead tr { border-bottom: 1px solid var(--border-hi); }
-  .msg-bubble th { padding: 7px 12px; text-align: left; font-weight: 600; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--text-3); white-space: nowrap; }
-  .msg-bubble td { padding: 7px 12px; color: var(--text-2); border-bottom: 1px solid var(--border); }
+  .msg-bubble th { padding: 5px 10px; text-align: left; font-weight: 600; font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--text-3); white-space: nowrap; }
+  .msg-bubble td { padding: 5px 10px; color: var(--text-2); border-bottom: 1px solid var(--border); white-space: nowrap; }
   .msg-bubble tr:last-child td { border-bottom: none; }
   .msg-bubble tr:hover td { background: var(--surface2); }
   .cell-overdue { color: #ff4e6a; font-weight: 600; }
@@ -627,7 +631,10 @@ function renderResult(bubble, result) {
   if (result.type==='confirm') { bubble.innerHTML = renderConfirm(result.confirm_text); return; }
   if (result.type==='error')   { bubble.innerHTML = renderStatusBlock(false, result.reply||'Something went wrong.',''); return; }
   const s = result.structured;
-  if (s) bubble.innerHTML = renderStructured(s);
+  if (s) {
+    if (s.format==='table') bubble.classList.add('has-table');
+    bubble.innerHTML = renderStructured(s);
+  }
   else if (result.reply) bubble.innerHTML = markdownToHtml(result.reply);
   else bubble.innerHTML = '<p>Done.</p>';
 }
@@ -641,9 +648,12 @@ function renderTable(d) {
   const cols=d.columns||[],rows=d.rows||[],title=d.title||'',footer=d.footer||'';
   const ths=cols.map(c=>`<th>${escHtml(c)}</th>`).join('');
   const trs=rows.map(r=>`<tr>${r.map(c=>`<td>${styleCell(String(c))}</td>`).join('')}</tr>`).join('');
-  return `${title?`<h3>${escHtml(title)}</h3>`:''}<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>${footer?`<p style="margin-top:8px"><em>${escHtml(footer)}</em></p>`:''}`;
+  const table=`<div class="table-scroll"><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
+  return `${title?`<h3>${escHtml(title)}</h3>`:''}${table}${footer?`<p style="margin-top:6px;font-size:11px;color:var(--text-3);font-family:var(--font-mono)">${escHtml(footer)}</p>`:''}`;
 }
 function styleCell(val) {
+  // Collapse newlines/multiline values into a single line
+  val = String(val).replace(/\n+/g,' ').replace(/\s{2,}/g,' ').trim();
   const v=val.toLowerCase();
   if (v.includes('overdue')||v.includes('due today')||v.includes('unpaid')) return `<span class="cell-overdue">${escHtml(val)}</span>`;
   if (['paid','completed','accepted','closed'].includes(v)) return `<span class="cell-paid">${escHtml(val)}</span>`;
@@ -785,4 +795,3 @@ document.getElementById('mcpUrlInput').focus();
 </script>
 </body>
 </html>
-
