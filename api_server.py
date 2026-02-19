@@ -736,6 +736,8 @@ async def delete_session(session_id: str) -> dict:
 
 BASE_DIR = Path(__file__).resolve().parent
 
+
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
-    return FileResponse(BASE_DIR / "favicon.ico")
+    return FileResponse(BASE_DIR / "favicon.ico", media_type="image/x-icon")
+
