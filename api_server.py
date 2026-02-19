@@ -612,6 +612,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         system_instruction=SUMMARIZE_SYSTEM,
                         temperature=0.1,
                         response_mime_type="application/json",
+                        max_output_tokens=65536,  # allow large tables (200+ rows)
                     ),
                 ):
                     full_json += chunk.text or ""
