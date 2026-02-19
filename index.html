@@ -217,6 +217,14 @@
   .msg-bubble td { padding: 5px 10px; color: var(--text-2); border-bottom: 1px solid var(--border); white-space: nowrap; }
   .msg-bubble tr:last-child td { border-bottom: none; }
   .msg-bubble tr:hover td { background: var(--surface2); }
+  .answer-card { background: linear-gradient(135deg, #00e5b010, #00e5b005); border: 1px solid #00e5b040; border-radius: var(--radius-sm); padding: 16px 18px; margin: 4px 0; }
+  .answer-question { font-size: 11px; font-family: var(--font-mono); color: var(--text-3); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 8px; }
+  .answer-value { font-size: 20px; font-weight: 700; color: var(--accent); font-family: var(--font-sans); letter-spacing: -.02em; line-height: 1.3; margin-bottom: 10px; }
+  .answer-breakdown { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 2px; }
+  .answer-breakdown-row { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+  .answer-breakdown-label { font-size: 11.5px; font-family: var(--font-mono); color: var(--text-3); }
+  .answer-breakdown-val   { font-size: 12px; font-family: var(--font-mono); color: var(--text-2); text-align: right; }
+  .answer-note { font-size: 11px; color: var(--text-3); font-style: italic; margin-top: 8px; font-family: var(--font-mono); }
   .cell-overdue { color: #ff4e6a; font-weight: 600; }
   .cell-paid    { color: var(--accent); }
   .cell-open    { color: var(--amber); }
@@ -638,8 +646,15 @@ function renderResult(bubble, result) {
   else if (result.reply) bubble.innerHTML = markdownToHtml(result.reply);
   else bubble.innerHTML = '<p>Done.</p>';
 }
+function renderAnswer(d) {
+  const q=d.question||'', a=d.answer||'Done.', bd=d.breakdown||[], note=d.note||'';
+  const bdHtml=bd.length?`<div class="answer-breakdown">${bd.map(([l,v])=>`<div class="answer-breakdown-row"><span class="answer-breakdown-label">${escHtml(l)}</span><span class="answer-breakdown-val">${escHtml(String(v))}</span></div>`).join('')}</div>`:'';
+  const noteHtml=note?`<div class="answer-note">${escHtml(note)}</div>`:'';
+  return `<div class="answer-card">${q?`<div class="answer-question">${escHtml(q)}</div>`:''}<div class="answer-value">${escHtml(a)}</div>${bdHtml}${noteHtml}</div>`;
+}
 function renderStructured(d) {
   const f = d.format||'status';
+  if (f==='answer') return renderAnswer(d);
   if (f==='table') return renderTable(d);
   if (f==='panel') return renderPanel(d);
   return renderStatusBlock(d.ok!==false, d.headline||'Done.', d.detail||'');
