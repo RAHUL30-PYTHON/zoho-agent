@@ -64,8 +64,8 @@ MAX_TOOL_PROPS: int          = int(os.getenv("MAX_TOOL_PROPS", "60"))
 MAX_REPLAN_ATTEMPTS: int     = int(os.getenv("MAX_REPLAN_ATTEMPTS", "3"))
 AUDIT_LOG_PATH: str          = os.getenv("AUDIT_LOG_PATH", "audit.jsonl")
 LOG_LEVEL: str               = os.getenv("LOG_LEVEL", "WARNING")
-TOOL_TIMEOUT: float          = float(os.getenv("TOOL_TIMEOUT_SECONDS", "50"))
-GEMINI_TIMEOUT: float        = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "90"))
+TOOL_TIMEOUT: float          = float(os.getenv("TOOL_TIMEOUT_SECONDS", "60"))
+GEMINI_TIMEOUT: float        = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "120"))
 CIRCUIT_BREAK_THRESHOLD: int = int(os.getenv("CIRCUIT_BREAK_THRESHOLD", "3"))
 CIRCUIT_BREAK_RESET_S: int   = int(os.getenv("CIRCUIT_BREAK_RESET_SECONDS", "120"))
 # Max chars of raw result sent to summarizer — prevents Gemini 400 on huge payloads
@@ -1275,6 +1275,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
