@@ -36,6 +36,7 @@ from zoho_agent import (
     SUMMARIZE_SYSTEM,
     TOOL_TIMEOUT,
     _estimate_tokens,
+    _safe_result_str,
     _stream_collect_json,
     add_memory,
     build_tool_catalog,
@@ -258,8 +259,10 @@ async def api_summarize(
     args: dict,
     result: Any,
     cid: str = "",
+    user_question: str = "",
 ) -> dict:
     prompt = (
+        f"USER_QUESTION: {user_question or '(not specified — use best judgement on format)'}\n"
         f"TOOL: {tool}\n"
         f"ARGS: {json.dumps(args, default=str)}\n"
         f"RESULT: {json.dumps(result, default=str)}"
@@ -274,6 +277,23 @@ async def api_summarize(
 
 def structured_to_markdown(data: dict) -> str:
     fmt = data.get("format", "status")
+
+    if fmt == "answer":
+        question  = data.get("question", "")
+        answer    = data.get("answer", "Done.")
+        breakdown = data.get("breakdown") or []
+        note      = data.get("note", "")
+        lines = []
+        if question:
+            lines.append(f"_{question}_\n")
+        lines.append(f"**{answer}**")
+        if breakdown:
+            lines.append("")
+            for label, value in breakdown:
+                lines.append(f"- **{label}:** {value}")
+        if note:
+            lines.append(f"\n_{note}_")
+        return "\n".join(lines)
 
     if fmt == "table":
         title  = data.get("title", "")
@@ -364,7 +384,8 @@ async def _run_plan(sess: AgentSession, plan: dict, cid: str) -> dict:
 
     if ok and last_result is not None:
         last_tool  = steps[-1].get("tool", "")
-        structured = await api_summarize(a.gemini, last_tool, steps[-1].get("args", {}), last_result, cid)
+        structured = await api_summarize(a.gemini, last_tool, steps[-1].get("args", {}), last_result, cid,
+                                              user_question=steps[-1].get("note", ""))
         sess.state.clear_workflow()
         sess.replan_attempts = 0
         a.audit.write("turn_success", tool=last_tool, cid=cid)
@@ -597,12 +618,18 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                            "session_id": sess.session_id})
                 return
 
-            last_tool = steps[-1].get("tool", "")
-            prompt    = (
+            last_step  = steps[-1]
+            last_tool  = last_step.get("tool", "")
+            user_q     = last_step.get("note", "")
+            result_str = _safe_result_str(last_result)
+            prompt     = (
+                f"USER_QUESTION: {user_q or '(not specified — use best judgement on format)'}\n"
                 f"TOOL: {last_tool}\n"
-                f"ARGS: {json.dumps(steps[-1].get('args', {}), default=str)}\n"
-                f"RESULT: {json.dumps(last_result, default=str)}"
+                f"ARGS: {json.dumps(last_step.get('args', {}), default=str)}\n"
+                f"RESULT: {result_str}"
             )
+            # Scale timeout: large payloads need more time to process
+            stream_timeout = max(GEMINI_TIMEOUT, min(180.0, len(result_str) / 2000))
             full_json = ""
 
             async def _collect_stream() -> str:
@@ -620,16 +647,19 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     full_json += chunk.text or ""
                 return full_json
 
-            # Large result sets (200+ records) can take >45s — use generous timeout
-            stream_timeout = max(GEMINI_TIMEOUT, 120.0)
             try:
                 await asyncio.wait_for(_collect_stream(), timeout=stream_timeout)
             except asyncio.TimeoutError:
-                log.warning("summarize_timeout", extra={"cid": cid, "tool": last_tool, "collected_chars": len(full_json)})
-                # Use whatever we collected if it looks structurally complete
+                log.warning("summarize_timeout", extra={
+                    "cid": cid, "tool": last_tool,
+                    "collected_chars": len(full_json),
+                    "timeout": stream_timeout,
+                })
                 if not (full_json.strip().endswith("}") or full_json.strip().endswith("]")):
-                    full_json = json.dumps({"format": "status", "ok": True,
-                                           "headline": f"{last_tool} completed but response timed out."})
+                    full_json = json.dumps({
+                        "format":   "status", "ok": True,
+                        "headline": f"{last_tool} completed (response timed out — try asking for a smaller set).",
+                    })
 
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", full_json.strip(), flags=re.MULTILINE).strip()
             try:
@@ -652,12 +682,11 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             pass
         except Exception as exc:
             import traceback as _tb
-            tb_str = _tb.format_exc()
             log.error("stream_error", extra={
-                "cid": cid,
-                "error": str(exc),
+                "cid":        cid,
+                "error":      str(exc),
                 "error_type": type(exc).__name__,
-                "traceback": tb_str,
+                "traceback":  _tb.format_exc(),
             })
             yield f"data: {json.dumps({'type': 'error', 'message': f'{type(exc).__name__}: {exc}'})}\n\n"
 
