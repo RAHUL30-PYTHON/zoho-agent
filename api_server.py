@@ -21,6 +21,8 @@ from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types as gtypes
 from mcp import ClientSession
+from pathlib import Path
+from fastapi.responses import FileResponse
 try:
     from mcp.client.streamable_http import streamable_http_client
 except ImportError:
@@ -731,3 +733,9 @@ async def delete_session(session_id: str) -> dict:
     if not await _app().sessions.delete(session_id):
         raise HTTPException(404, "Session not found.")
     return {"deleted": session_id}
+
+BASE_DIR = Path(__file__).resolve().parent
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return FileResponse(BASE_DIR / "favicon.ico")
