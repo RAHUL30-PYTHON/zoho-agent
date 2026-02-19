@@ -70,8 +70,9 @@ except ImportError:
 load_dotenv("api.env")
 
 MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
-MAX_MEMORY_TOKENS: int = int(os.getenv("MAX_MEMORY_TOKENS", "20000"))
-MAX_MEMORY_ENTRIES: int = int(os.getenv("MAX_MEMORY_ENTRIES", "30"))
+MAX_MEMORY_TOKENS: int = int(os.getenv("MAX_MEMORY_TOKENS", "24000"))
+MAX_MEMORY_ENTRIES: int = int(os.getenv("MAX_MEMORY_ENTRIES", "60"))
+MEMORY_SUMMARIZE_THRESHOLD: int = int(os.getenv("MEMORY_SUMMARIZE_THRESHOLD", "45"))  # summarize when entries exceed this
 MAX_TOOL_PROPS: int = int(os.getenv("MAX_TOOL_PROPS", "60"))
 MAX_REPLAN_ATTEMPTS: int = int(os.getenv("MAX_REPLAN_ATTEMPTS", "3"))
 AUDIT_LOG_PATH: str = os.getenv("AUDIT_LOG_PATH", "audit.jsonl")
@@ -351,30 +352,126 @@ def validate_args(meta: ToolMeta, args: dict) -> tuple[list[str], list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Memory — token-budget-aware ring buffer
+# Memory — summarize-before-evict, no blind trimming
 # ---------------------------------------------------------------------------
 def _estimate_tokens(obj: Any) -> int:
     """Rough token estimate: ~4 chars per token."""
     return max(1, len(json.dumps(obj, default=str)) // 4)
 
 
-def add_memory(memory: list[dict], entry: dict) -> None:
-    # Trim oversized result payloads
-    if "result" in entry and isinstance(entry["result"], dict):
-        content = entry["result"].get("content")
-        if isinstance(content, list) and len(content) > 1:
-            entry = {**entry, "result": {**entry["result"], "content": content[:2]}}
+MEMORY_SUMMARIZE_SYSTEM = """
+You are a memory compressor for a Zoho Books AI agent.
+You will receive a list of past tool call records (tool name, args, result, errors).
+Produce a single compact JSON object that preserves ALL facts an agent would need
+to continue the conversation: entity IDs, names, amounts, statuses, errors, and
+what actions were taken. Drop raw API payloads but keep all meaningful values.
 
+Return ONLY this JSON shape — no prose, no markdown:
+{
+  "type": "summary",
+  "covers_entries": <integer count of entries summarised>,
+  "facts": {
+    "<entity_type>": [{"id": "...", "name": "...", "<key>": "<value>", ...}, ...],
+    "actions_taken": ["<verb> <entity> <id>", ...],
+    "errors": ["<brief description>", ...]
+  }
+}
+""".strip()
+
+
+async def summarize_memory_async(
+    client: genai.Client,
+    entries: list[dict],
+    cid: str = "",
+) -> dict:
+    """
+    Ask Gemini to compress a batch of memory entries into a single summary dict.
+    Falls back to a minimal hand-crafted summary if Gemini fails.
+    """
+    prompt = "Compress these memory entries:\n" + json.dumps(entries, default=str)
+    try:
+        raw = await _stream_collect_json(client, prompt, MEMORY_SUMMARIZE_SYSTEM, cid)
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
+        parsed = json.loads(cleaned)
+        parsed["covers_entries"] = len(entries)
+        log.info("memory_summarized", extra={"entries": len(entries), "cid": cid})
+        return parsed
+    except Exception as exc:
+        log.warning("memory_summarize_failed", extra={"error": str(exc), "cid": cid})
+        # Hand-crafted fallback: extract tool names, any IDs, any errors
+        actions = []
+        errors = []
+        for e in entries:
+            tool = e.get("tool", "")
+            if tool:
+                actions.append(tool)
+            if "error" in e:
+                errors.append(str(e["error"])[:120])
+        return {
+            "type": "summary",
+            "covers_entries": len(entries),
+            "facts": {
+                "actions_taken": actions,
+                "errors": errors,
+            },
+        }
+
+
+def add_memory(
+    memory: list[dict],
+    entry: dict,
+    gemini_client: Optional[Any] = None,
+    cid: str = "",
+) -> Optional[asyncio.Task]:
+    """
+    Append entry to memory. When memory grows too large:
+      - If a Gemini client is available: fire an async task to summarize the
+        oldest half, replace those entries with one compact summary dict.
+      - If no client (synchronous callers): evict the oldest entries as before,
+        but only AFTER we've already kept the full result in memory.
+
+    Returns the asyncio.Task for summarization (or None).
+    NOTE: The result payload is stored IN FULL — no pre-truncation.
+    """
+    # Store the full entry — no content[:2] trimming anymore
     memory.append(entry)
 
-    # Evict oldest until within budget
-    while len(memory) > MAX_MEMORY_ENTRIES:
+    total_tokens = sum(_estimate_tokens(m) for m in memory)
+    over_entries = len(memory) > MAX_MEMORY_ENTRIES
+    over_tokens  = total_tokens > MAX_MEMORY_TOKENS
+
+    if not (over_entries or over_tokens):
+        return None  # still within budget, nothing to do
+
+    # ── Strategy 1: async summarization (preferred) ──────────────────────────
+    if gemini_client is not None:
+        # Summarize the oldest half, keep the recent half intact
+        split = len(memory) // 2
+        to_summarize = memory[:split]
+        del memory[:split]
+
+        async def _do_summarize() -> None:
+            summary = await summarize_memory_async(gemini_client, to_summarize, cid)
+            memory.insert(0, summary)
+
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(_do_summarize())
+            return task
+        except RuntimeError:
+            pass  # no running loop — fall through to eviction
+
+    # ── Strategy 2: synchronous eviction fallback (no Gemini available) ──────
+    # Only evict if genuinely over-budget; keep at least 4 entries
+    while len(memory) > max(4, MAX_MEMORY_ENTRIES):
         memory.pop(0)
     while (
-        len(memory) > 2
+        len(memory) > 4
         and sum(_estimate_tokens(m) for m in memory) > MAX_MEMORY_TOKENS
     ):
         memory.pop(0)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +522,7 @@ def _build_planner_payload(
         {
             "TOOLBOX": {n: m.to_planner_dict() for n, m in toolbox.items()},
             "STATE": state.to_dict(),
-            "MEMORY": memory[-10:],
+            "MEMORY": memory,   # full memory — summaries keep this compact
             "USER": user_msg,
         },
         ensure_ascii=False,
@@ -453,6 +550,7 @@ async def gemini_plan(
                     system_instruction=PLANNER_SYSTEM,
                     temperature=0.4,
                     response_mime_type="application/json",
+                    max_output_tokens=8192,
                 ),
             ),
             timeout=GEMINI_TIMEOUT,
@@ -473,7 +571,7 @@ async def gemini_plan(
 # ---------------------------------------------------------------------------
 
 SUMMARIZE_SYSTEM = """
-You are a Zoho Books assistant. Given a tool call result, produce a clean terminal-friendly response.
+You are a Zoho Books assistant. Given a tool call result, produce a clean structured response.
 
 Decide the best format based on the data:
 - LIST of records (bills, invoices, contacts, items, payments, expenses, etc.) → use format "table"
@@ -509,7 +607,8 @@ For "status":
   "detail": "optional extra line"
 }
 
-Rules:
+CRITICAL RULES — you MUST follow these exactly:
+- Include EVERY SINGLE record from the result in the rows array. Do NOT truncate, sample, or summarise the list. If there are 200 invoices, output all 200 rows. If there are 500 contacts, output all 500 rows. Never add a "...and X more" row.
 - Currency values: always include symbol (Rs., $, etc.)
 - Dates: format as DD MMM YYYY
 - Status values: capitalise (Open, Paid, Overdue, Draft, Void)
@@ -517,6 +616,7 @@ Rules:
 - Never use markdown bold (**), asterisks (*), or backticks anywhere in values
 - IDs: keep as-is, do not shorten
 - Empty result sets: use format "status" with ok=false
+- The footer field should state the total count, e.g. "Showing all 200 invoices"
 """.strip()
 
 
@@ -635,6 +735,7 @@ async def _stream_collect_json(client: genai.Client, prompt: str, system: str, c
                     system_instruction=system,
                     temperature=0.1,
                     response_mime_type="application/json",
+                    max_output_tokens=65536,  # large tables need headroom
                 ),
             ):
                 token = chunk.text or ""
@@ -654,6 +755,7 @@ async def _stream_collect_json(client: genai.Client, prompt: str, system: str, c
                     system_instruction=system,
                     temperature=0.1,
                     response_mime_type="application/json",
+                    max_output_tokens=65536,
                 ),
             ),
             timeout=GEMINI_TIMEOUT,
@@ -721,6 +823,7 @@ async def execute_step(
     audit: AuditLog,
     step: dict,
     correlation_id: str,
+    gemini_client: Optional[Any] = None,
 ) -> tuple[bool, Optional[Any]]:
     """
     Execute one plan step. Returns (success, result_data).
@@ -732,7 +835,7 @@ async def execute_step(
     # Unknown tool
     if not tool_name or tool_name not in toolbox:
         msg = f"Unknown tool: '{tool_name}'"
-        add_memory(memory, {"error": msg, "step": step, "cid": correlation_id})
+        add_memory(memory, {"error": msg, "step": step, "cid": correlation_id}, gemini_client, correlation_id)
         log.warning("unknown_tool", extra={"tool": tool_name, "cid": correlation_id})
         return False, None
 
@@ -743,7 +846,7 @@ async def execute_step(
     if cb.is_open():
         msg = f"Tool '{tool_name}' is temporarily disabled (circuit open after repeated failures)."
         _print(f"[bold red]Assistant:[/bold red] {msg}\n")
-        add_memory(memory, {"error": msg, "tool": tool_name, "cid": correlation_id})
+        add_memory(memory, {"error": msg, "tool": tool_name, "cid": correlation_id}, gemini_client, correlation_id)
         return False, None
 
     # Auto-inject organization_id
@@ -764,7 +867,7 @@ async def execute_step(
                 "allowed": meta.allowed[:40],
                 "required": meta.required,
             },
-        })
+        }, gemini_client, correlation_id)
         log.warning("schema_error", extra={"tool": tool_name, "unknown": unknown, "missing": missing})
         return False, None
 
@@ -786,14 +889,14 @@ async def execute_step(
         )
     except asyncio.TimeoutError:
         msg = f"Tool '{tool_name}' timed out after {TOOL_TIMEOUT}s."
-        add_memory(memory, {"tool": tool_name, "error": msg, "cid": correlation_id})
+        add_memory(memory, {"tool": tool_name, "error": msg, "cid": correlation_id}, gemini_client, correlation_id)
         cb.record_failure()
         log.error("tool_timeout", extra={"tool": tool_name, "cid": correlation_id})
         _print(f"[bold yellow]Assistant:[/bold yellow] {msg}\n")
         return False, None
     except Exception as exc:
         msg = str(exc)
-        add_memory(memory, {"tool": tool_name, "args": args, "error": msg, "cid": correlation_id})
+        add_memory(memory, {"tool": tool_name, "args": args, "error": msg, "cid": correlation_id}, gemini_client, correlation_id)
         cb.record_failure()
         log.error("tool_error", extra={"tool": tool_name, "error": msg, "cid": correlation_id})
         _print(f"[bold red]Assistant:[/bold red] Tool call failed — {msg}\n")
@@ -809,7 +912,7 @@ async def execute_step(
         "result": result_data,
         "elapsed_s": elapsed,
         "cid": correlation_id,
-    })
+    }, gemini_client, correlation_id)
     audit.write("tool_called", tool=tool_name, args=args, elapsed_s=elapsed, cid=correlation_id)
     log.info("tool_success", extra={"tool": tool_name, "elapsed_s": elapsed, "cid": correlation_id})
     return True, result_data
@@ -845,7 +948,7 @@ async def execute_plan(
 
             log.info("parallel_batch", extra={"size": len(batch), "cid": correlation_id})
             tasks = [
-                execute_step(session, toolbox, state, memory, audit, s, correlation_id)
+                execute_step(session, toolbox, state, memory, audit, s, correlation_id, gemini)
                 for s in batch
             ]
             results = await asyncio.gather(*tasks)
@@ -860,7 +963,7 @@ async def execute_plan(
             continue
 
         # Sequential step
-        ok, rdata = await execute_step(session, toolbox, state, memory, audit, step, correlation_id)
+        ok, rdata = await execute_step(session, toolbox, state, memory, audit, step, correlation_id, gemini)
         if not ok:
             return False, None
         last_result = rdata
