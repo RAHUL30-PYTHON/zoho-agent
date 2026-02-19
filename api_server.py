@@ -415,7 +415,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     audit    = AuditLog(AUDIT_LOG_PATH)
     sessions = SessionStore()
 
-    log.warning("server_ready", extra={"model": MODEL})
+    log.info("server_ready", extra={"model": MODEL})
     _state = _App(gemini=gemini, audit=audit, sessions=sessions)
 
     async def _reap() -> None:
@@ -604,7 +604,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 f"RESULT: {json.dumps(last_result, default=str)}"
             )
             full_json = ""
-            async with asyncio.timeout(GEMINI_TIMEOUT):
+
+            async def _collect_stream() -> str:
+                nonlocal full_json
                 async for chunk in await a.gemini.aio.models.generate_content_stream(
                     model=MODEL,
                     contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=prompt)])],
@@ -612,10 +614,22 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         system_instruction=SUMMARIZE_SYSTEM,
                         temperature=0.1,
                         response_mime_type="application/json",
-                        max_output_tokens=65536,  # allow large tables (200+ rows)
+                        max_output_tokens=65536,
                     ),
                 ):
                     full_json += chunk.text or ""
+                return full_json
+
+            # Large result sets (200+ records) can take >45s — use generous timeout
+            stream_timeout = max(GEMINI_TIMEOUT, 120.0)
+            try:
+                await asyncio.wait_for(_collect_stream(), timeout=stream_timeout)
+            except asyncio.TimeoutError:
+                log.warning("summarize_timeout", extra={"cid": cid, "tool": last_tool, "collected_chars": len(full_json)})
+                # Use whatever we collected if it looks structurally complete
+                if not (full_json.strip().endswith("}") or full_json.strip().endswith("]")):
+                    full_json = json.dumps({"format": "status", "ok": True,
+                                           "headline": f"{last_tool} completed but response timed out."})
 
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", full_json.strip(), flags=re.MULTILINE).strip()
             try:
@@ -637,8 +651,15 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            log.error("stream_error", extra={"cid": cid, "error": str(exc)})
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+            import traceback as _tb
+            tb_str = _tb.format_exc()
+            log.error("stream_error", extra={
+                "cid": cid,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "traceback": tb_str,
+            })
+            yield f"data: {json.dumps({'type': 'error', 'message': f'{type(exc).__name__}: {exc}'})}\n\n"
 
     return StreamingResponse(
         _stream(),
