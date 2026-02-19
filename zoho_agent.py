@@ -53,7 +53,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 load_dotenv("api.env")
 
-MODEL: str                   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-04-17")
+MODEL: str                   = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 # Optionally use a faster model just for planning (e.g. gemini-1.5-flash-8b or gemini-2.0-flash)
 # Summarizer always uses MODEL since it needs to handle large outputs
 PLANNER_MODEL: str           = os.getenv("GEMINI_PLANNER_MODEL", MODEL)
@@ -1275,3 +1275,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
