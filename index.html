@@ -466,9 +466,13 @@ async function connectMcp() {
       document.getElementById('modelBadge').textContent = d.model || 'gemini';
     }
   } catch {
-    // Server unreachable or timed out — proceed anyway, show warning in footer
-    connStatus.textContent = 'Server unreachable';
-    connStatus.style.color = 'var(--amber)';
+    el = connStatus
+    if (el) {
+    el.textContent = 'Server unreachable';
+    el.style.color = 'var(--amber)';
+  } else {
+    console.warn("Missing #connStatus element in DOM");
+  }
   }
 
   mcpUrl = url;
@@ -808,4 +812,5 @@ document.getElementById('mcpUrlInput').focus();
 </script>
 </body>
 </html>
+
 
