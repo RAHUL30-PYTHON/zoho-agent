@@ -76,7 +76,6 @@
   .setup-brand-name { font-size: 18px; font-weight: 800; color: var(--text); letter-spacing: -.02em; line-height: 1.2; }
   .setup-brand-sub  { font-size: 11px; font-family: var(--font-mono); color: var(--accent); letter-spacing: .1em; text-transform: uppercase; margin-top: 2px; }
 
-  /* Step indicator */
   .setup-steps { display: flex; align-items: center; }
   .setup-step-pill { display: flex; align-items: center; gap: 6px; font-size: 11px; font-family: var(--font-mono); color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; }
   .setup-step-pill.active { color: var(--accent); }
@@ -132,7 +131,6 @@
   /* ── Shell ──────────────────────────────────────────────────── */
   .shell { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: 100vh; height: 100vh; opacity: 0; pointer-events: none; transition: opacity .4s ease; }
   .shell.visible { opacity: 1; pointer-events: all; }
-  /* Sidebar */
   .sidebar { background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; position: relative; }
   .sidebar::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); opacity: .6; }
   .brand { padding: 24px 20px 20px; border-bottom: 1px solid var(--border); }
@@ -162,7 +160,6 @@
   .status-row span { color: var(--text-2); }
   .mcp-url-row { font-size: 10px; font-family: var(--font-mono); color: var(--text-3); word-break: break-all; line-height: 1.4; padding-top: 2px; }
 
-  /* Main */
   .main { display: flex; flex-direction: column; height: 100vh; overflow: hidden; position: relative; background: var(--bg); }
   .main::before { content: ''; position: absolute; inset: 0; background-image: linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px); background-size: 40px 40px; opacity: .18; pointer-events: none; z-index: 0; }
 
@@ -318,7 +315,6 @@
       </div>
     </div>
 
-    <!-- Step pills -->
     <div class="setup-steps">
       <div class="setup-step-pill active" id="pill1">
         <div class="setup-step-num" id="num1">1</div>MCP Server
@@ -331,7 +327,6 @@
 
     <div class="setup-divider"></div>
 
-    <!-- Panel 1: MCP URL -->
     <div class="setup-panel" id="panel1">
       <div class="setup-field">
         <label class="setup-label" for="mcpUrlInput">MCP Server URL</label>
@@ -350,7 +345,6 @@
       <div class="setup-hint">The URL is stored for this browser session only<br>and sent with every request to the API.</div>
     </div>
 
-    <!-- Panel 2: Org ID -->
     <div class="setup-panel hidden" id="panel2">
       <div class="setup-field">
         <label class="setup-label" for="orgIdInput">Zoho Organisation ID</label>
@@ -393,7 +387,7 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
       New conversation
     </button> -->
-    <div class="sidebar-section">In your Conversation</div>
+    <div class="sidebar-section">In conversation</div>
     <div class="history-list" id="historyList"></div>
     <div class="sidebar-footer">
       <div class="status-row">
@@ -434,14 +428,6 @@
           </div>
           <div class="empty-title">What can I help with?</div>
           <div class="empty-sub">Ask me anything about your Zoho Books data — invoices, bills, contacts, payments, reports, and more.</div>
-          <!-- <div class="suggestions">
-            <span class="suggestion-chip" onclick="sendSuggestion(this)">List unpaid bills</span>
-            <span class="suggestion-chip" onclick="sendSuggestion(this)">Create an invoice</span>
-            <span class="suggestion-chip" onclick="sendSuggestion(this)">Show aged receivables</span>
-            <span class="suggestion-chip" onclick="sendSuggestion(this)">List all contacts</span>
-            <span class="suggestion-chip" onclick="sendSuggestion(this)">Create a bill</span>
-            <span class="suggestion-chip" onclick="sendSuggestion(this)">Show P&L report</span>
-          </div> -->
         </div>
       </div>
     </div>
@@ -479,7 +465,6 @@ let orgId       = null;
 let sessionId   = null;
 let isStreaming  = false;
 
-
 // ── DOM ──────────────────────────────────────────────────────────
 const messagesEl    = document.getElementById('messagesEl');
 const messagesInner = document.getElementById('messagesInner');
@@ -510,13 +495,11 @@ function btnLoading(n, loading, loadLabel) {
   lb.textContent   = loading ? loadLabel : (n === 1 ? 'Connect' : 'Start chatting');
 }
 
-// ── Step 1: MCP connect ──────────────────────────────────────────
 async function connectMcp() {
   const input = document.getElementById('mcpUrlInput');
   const raw   = input.value.trim();
   if (!raw) { showErr(1, 'MCP URL is required.'); input.focus(); return; }
 
-  // Accept bare URLs missing the scheme and auto-prefix https://
   let url = raw;
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
     url = 'https://' + url;
@@ -526,7 +509,6 @@ async function connectMcp() {
 
   btnLoading(1, true, 'Connecting…');
 
-  // Health check with a 6s timeout so we never hang forever
   try {
     const ctrl = new AbortController();
     const tid  = setTimeout(() => ctrl.abort(), 6000);
@@ -537,21 +519,15 @@ async function connectMcp() {
       document.getElementById('modelBadge').textContent = d.model || 'gemini';
     }
   } catch {
-    el = connStatus
-    if (el) {
-    el.textContent = 'Server unreachable';
-    el.style.color = 'var(--amber)';
-  } else {
-    console.warn("Missing #connStatus element in DOM");
-  }
+    const el = connStatus;
+    if (el) { el.textContent = 'Server unreachable'; el.style.color = 'var(--amber)'; }
   }
 
   mcpUrl = url;
-  input.value = url;   // update field to show the normalised URL
+  input.value = url;
   document.getElementById('mcpUrlDisplay').textContent = truncateUrl(url);
   btnLoading(1, false, '');
 
-  // Advance to step 2
   const pill1 = document.getElementById('pill1'), num1 = document.getElementById('num1');
   pill1.classList.remove('active'); pill1.classList.add('done');
   num1.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="11" height="11"><path d="M20 6L9 17l-5-5"/></svg>`;
@@ -562,7 +538,6 @@ async function connectMcp() {
   setTimeout(() => document.getElementById('orgIdInput').focus(), 80);
 }
 
-// ── Step 2: Org ID ────────────────────────────────────────────────
 function submitOrg() {
   const input = document.getElementById('orgIdInput');
   const val   = input.value.trim();
@@ -600,8 +575,6 @@ function newChat() {
   inputBox.value = '';
   autoResize(inputBox);
 }
-
-
 
 const escHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 const sid6 = s => s ? s.slice(-6) : '—';
@@ -680,11 +653,22 @@ function renderStructured(d) {
 function renderTable(d) {
   const cols=d.columns||[],rows=d.rows||[],title=d.title||'',footer=d.footer||'';
   const morePagesIncoming = d.__more_pages__;
+
+  // FIX: Before assigning id="liveTable" to the new table, remove it from any
+  // existing table in the DOM. Without this, after the first paginated query
+  // completes, the old table keeps id="liveTable". When the second query arrives
+  // and creates a new liveTable, there are two elements with the same id.
+  // document.querySelector('#liveTable') returns the FIRST (stale) one, so
+  // table_append rows get appended to the wrong table and the new table appears stuck.
+  if (morePagesIncoming) {
+    const stale = document.getElementById('liveTable');
+    if (stale) stale.removeAttribute('id');
+  }
+
   const tableId = morePagesIncoming ? 'id="liveTable"' : '';
   const ths=cols.map(c=>`<th>${escHtml(c)}</th>`).join('');
   const trs=rows.map(r=>`<tr>${r.map(c=>`<td>${styleCell(String(c))}</td>`).join('')}</tr>`).join('');
   const table=`<div class="table-scroll"><table ${tableId}><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
-  // If more pages are coming, show a live loading footer
   const footerHtml = morePagesIncoming
     ? `<div id="liveTableFooter" class="table-footer-live" style="margin-top:6px">
         <span class="table-row-count" style="font-size:11px;font-family:var(--font-mono);color:var(--text-3)">${escHtml(footer||`${rows.length} records loaded`)}</span>
@@ -694,7 +678,6 @@ function renderTable(d) {
   return `${title?`<h3>${escHtml(title)}</h3>`:''}${table}${footerHtml}`;
 }
 function styleCell(val) {
-  // Collapse newlines/multiline values into a single line
   val = String(val).replace(/\n+/g,' ').replace(/\s{2,}/g,' ').trim();
   const v=val.toLowerCase();
   if (v.includes('overdue')||v.includes('due today')||v.includes('unpaid')) return `<span class="cell-overdue">${escHtml(val)}</span>`;
@@ -768,7 +751,6 @@ async function sendMessage() {
   if (!text||isStreaming) return;
   inputBox.value=''; autoResize(inputBox); setLoading(true);
 
-
   appendUserMsg(text);
   appendTyping();
   try { await streamChat(text); }
@@ -776,7 +758,7 @@ async function sendMessage() {
   finally { setLoading(false); inputBox.focus(); }
 }
 
-// ── SSE stream — always sends org_id ─────────────────────────────
+// ── SSE stream ────────────────────────────────────────────────────
 async function streamChat(message) {
   const resp = await fetch(`${API_BASE}/chat/stream`,{
     method:'POST',headers:{'Content-Type':'application/json'},
@@ -784,7 +766,7 @@ async function streamChat(message) {
       message,
       session_id: sessionId||undefined,
       mcp_url:    mcpUrl,
-      org_id:     orgId,      // ← always included
+      org_id:     orgId,
     }),
   });
   if (!resp.ok) {
@@ -808,8 +790,7 @@ async function streamChat(message) {
       }
       else if (evt.type==='done') {
         const elapsed=Date.now()-t0;
-        if (evt.session_id) { sessionId=evt.session_id; sessionDisp.textContent=sid6(sessionId); // Bind session ID to active thread on first response
-}
+        if (evt.session_id) { sessionId=evt.session_id; sessionDisp.textContent=sid6(sessionId); }
         const fakeResult={type:'reply',structured:evt.structured,reply:streamText};
         if (streamDiv) {
           const bubble=streamDiv.querySelector('.msg-bubble');
@@ -823,8 +804,7 @@ async function streamChat(message) {
         scrollBottom();
       }
       else if (evt.type==='table_append') {
-        // New page arrived — columns already match page 1, just append rows
-        const tbl = document.querySelector('#liveTable');
+        const tbl = document.getElementById('liveTable');
         if (tbl) {
           const tbody = tbl.querySelector('tbody');
           (evt.rows || []).forEach(row => {
@@ -855,6 +835,9 @@ async function streamChat(message) {
           const count = footer.querySelector('.table-row-count');
           if (count) count.textContent = `Showing all ${evt.total} records`;
         }
+        // FIX: Remove liveTable id once pagination is complete so it doesn't
+        // interfere with the next query's table (which will claim the id fresh).
+        document.getElementById('liveTable')?.removeAttribute('id');
       }
       else if (evt.type==='confirm') {
         if(evt.session_id){sessionId=evt.session_id;sessionDisp.textContent=sid6(sessionId);}
@@ -862,7 +845,6 @@ async function streamChat(message) {
       }
       else if (evt.type==='error') {
         const msg = evt.message || 'Unknown error';
-        // MCP connection errors — show reconnect option
         const isMcpError = msg.toLowerCase().includes('mcp') ||
                            msg.toLowerCase().includes('connect') ||
                            msg.toLowerCase().includes('502') ||
@@ -883,8 +865,3 @@ document.getElementById('mcpUrlInput').focus();
 </script>
 </body>
 </html>
-
-
-
-
-
