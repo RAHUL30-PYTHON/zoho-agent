@@ -1,1412 +1,786 @@
-"""
-zoho_agent.py — Production-ready Zoho Books MCP Agent
-"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Zoho Books AI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:           #0a0c0f;
+    --surface:      #111418;
+    --surface2:     #181c22;
+    --border:       #1e2530;
+    --border-hi:    #2a3340;
+    --accent:       #00e5b0;
+    --accent-dim:   #00e5b020;
+    --accent-glow:  #00e5b040;
+    --amber:        #ffb347;
+    --amber-dim:    #ffb34720;
+    --red:          #ff4e6a;
+    --red-dim:      #ff4e6a18;
+    --text:         #e8edf5;
+    --text-2:       #8a96a8;
+    --text-3:       #4a5568;
+    --user-bg:      #0d1f1a;
+    --user-border:  #00e5b030;
+    --radius:       14px;
+    --radius-sm:    8px;
+    --font-mono:    'DM Mono', monospace;
+    --font-sans:    'Syne', sans-serif;
+    --transition:   200ms cubic-bezier(.4,0,.2,1);
+  }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font-sans); font-size: 15px; line-height: 1.6; overflow: hidden; -webkit-font-smoothing: antialiased; }
 
-from __future__ import annotations
+  /* ── Setup Modal ─────────────────────────────────────────────── */
+  .setup-overlay {
+    position: fixed; inset: 0; z-index: 9999;
+    background: #0a0c0ff5;
+    display: flex; align-items: center; justify-content: center;
+    backdrop-filter: blur(4px);
+    animation: overlay-in .3s ease both;
+  }
+  .setup-overlay.hidden { display: none; }
+  @keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
 
-import asyncio
-import json
-import logging
-import os
-import re
-import signal
-import sys
-import time
-import uuid
-from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Optional
+  .setup-card {
+    background: var(--surface);
+    border: 1px solid var(--border-hi);
+    border-radius: var(--radius);
+    padding: 36px 32px 32px;
+    width: 100%; max-width: 440px;
+    position: relative;
+    display: flex; flex-direction: column; gap: 24px;
+    animation: card-in .35s cubic-bezier(.2,.8,.3,1) both;
+    box-shadow: 0 32px 80px #00000060, 0 0 0 1px var(--border-hi);
+  }
+  @keyframes card-in { from { opacity: 0; transform: translateY(20px) scale(.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
+  .setup-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent 0%, var(--accent) 40%, var(--accent) 60%, transparent 100%);
+    border-radius: var(--radius) var(--radius) 0 0; opacity: .9;
+  }
 
-import httpx
-from dotenv import load_dotenv
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-from google import genai
-from google.genai import types
+  .setup-brand { display: flex; align-items: center; gap: 14px; }
+  .setup-brand-icon {
+    width: 42px; height: 42px; background: var(--accent); border-radius: 10px;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    box-shadow: 0 0 24px var(--accent-glow);
+  }
+  .setup-brand-icon svg { width: 22px; height: 22px; color: #0a0c0f; }
+  .setup-brand-name { font-size: 18px; font-weight: 800; color: var(--text); letter-spacing: -.02em; line-height: 1.2; }
+  .setup-brand-sub  { font-size: 11px; font-family: var(--font-mono); color: var(--accent); letter-spacing: .1em; text-transform: uppercase; margin-top: 2px; }
 
-# ---------------------------------------------------------------------------
-# Rich console — degrades gracefully if not installed
-# ---------------------------------------------------------------------------
-RICH_AVAILABLE = False
-try:
-    from rich.console import Console
-    from rich.table import Table
-    from rich.panel import Panel
-    from rich import box
-    from rich.markup import escape as rich_escape
-    _console = Console(highlight=False)
-    RICH_AVAILABLE = True
-    def _print(msg: str, style: str = "") -> None:
-        _console.print(msg, style=style)
-    def _print_raw(obj: Any) -> None:
-        _console.print(obj)
-except ImportError:
-    def _print(msg: str, style: str = "") -> None:  # type: ignore[misc]
-        print(msg)
-    def _print_raw(obj: Any) -> None:  # type: ignore[misc]
-        print(obj)
+  /* Step indicator */
+  .setup-steps { display: flex; align-items: center; }
+  .setup-step-pill { display: flex; align-items: center; gap: 6px; font-size: 11px; font-family: var(--font-mono); color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; }
+  .setup-step-pill.active { color: var(--accent); }
+  .setup-step-pill.done   { color: var(--text-2); }
+  .setup-step-num {
+    width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border-hi);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; background: var(--surface2); color: var(--text-3); flex-shrink: 0;
+  }
+  .setup-step-pill.active .setup-step-num { background: var(--accent); border-color: var(--accent); color: #0a0c0f; }
+  .setup-step-pill.done   .setup-step-num { background: var(--surface2); border-color: var(--accent-glow); color: var(--accent); }
+  .setup-step-sep { flex: 1; height: 1px; background: var(--border-hi); margin: 0 10px; }
 
-# ---------------------------------------------------------------------------
-# Environment & constants
-# ---------------------------------------------------------------------------
-load_dotenv("api.env")
+  .setup-divider { height: 1px; background: var(--border); margin: 0 -4px; }
 
-MODEL: str                   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-04-17")
-# Optionally use a faster model just for planning (e.g. gemini-1.5-flash-8b or gemini-2.0-flash)
-# Summarizer always uses MODEL since it needs to handle large outputs
-PLANNER_MODEL: str           = os.getenv("GEMINI_PLANNER_MODEL", MODEL)
-MAX_MEMORY_TOKENS: int       = int(os.getenv("MAX_MEMORY_TOKENS", "24000"))
-MAX_MEMORY_ENTRIES: int      = int(os.getenv("MAX_MEMORY_ENTRIES", "60"))
-MEMORY_SUMMARIZE_THRESHOLD   = int(os.getenv("MEMORY_SUMMARIZE_THRESHOLD", "45"))
-MAX_TOOL_PROPS: int          = int(os.getenv("MAX_TOOL_PROPS", "60"))
-MAX_REPLAN_ATTEMPTS: int     = int(os.getenv("MAX_REPLAN_ATTEMPTS", "3"))
-AUDIT_LOG_PATH: str          = os.getenv("AUDIT_LOG_PATH", "audit.jsonl")
-LOG_LEVEL: str               = os.getenv("LOG_LEVEL", "WARNING")
-TOOL_TIMEOUT: float          = float(os.getenv("TOOL_TIMEOUT_SECONDS", "30"))
-GEMINI_TIMEOUT: float        = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "60"))
-CIRCUIT_BREAK_THRESHOLD: int = int(os.getenv("CIRCUIT_BREAK_THRESHOLD", "3"))
-CIRCUIT_BREAK_RESET_S: int   = int(os.getenv("CIRCUIT_BREAK_RESET_SECONDS", "120"))
-# Max chars of raw result sent to summarizer — prevents Gemini 400 on huge payloads
-SUMMARIZE_INPUT_CHAR_LIMIT: int = int(os.getenv("SUMMARIZE_INPUT_CHAR_LIMIT", "400000"))
+  .setup-field { display: flex; flex-direction: column; gap: 8px; }
+  .setup-label { font-size: 10.5px; font-family: var(--font-mono); color: var(--text-3); letter-spacing: .1em; text-transform: uppercase; }
+  .setup-label-hint { font-size: 10.5px; font-family: var(--font-mono); color: var(--text-3); line-height: 1.6; margin-top: 2px; }
+  .setup-input {
+    background: var(--surface2); border: 1px solid var(--border-hi); border-radius: var(--radius-sm);
+    padding: 12px 14px; font-family: var(--font-mono); font-size: 13px; color: var(--text);
+    outline: none; width: 100%; transition: border-color var(--transition), box-shadow var(--transition);
+  }
+  .setup-input::placeholder { color: var(--text-3); }
+  .setup-input:focus { border-color: var(--accent-glow); box-shadow: 0 0 0 3px var(--accent-dim); }
+  .setup-input.error { border-color: #ff4e6a50; box-shadow: 0 0 0 3px var(--red-dim); }
 
-REQUIRED_ENV_VARS = ["GEMINI_API_KEY"]
+  .setup-error { font-size: 11px; font-family: var(--font-mono); color: var(--red); display: none; }
+  .setup-error.show { display: block; }
 
-# ---------------------------------------------------------------------------
-# Logging — proper JSON formatter that always emits extra= fields
-# ---------------------------------------------------------------------------
-_LOG_RECORD_BUILTINS = frozenset({
-    "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
-    "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
-    "created", "msecs", "relativeCreated", "thread", "threadName",
-    "processName", "process", "message", "taskName", "asctime",
-})
+  .setup-btn {
+    width: 100%; padding: 13px;
+    background: var(--accent); border: none; border-radius: var(--radius-sm);
+    color: #0a0c0f; font-family: var(--font-sans); font-size: 14px; font-weight: 700;
+    cursor: pointer; transition: var(--transition); letter-spacing: .02em;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    position: relative; overflow: hidden;
+  }
+  .setup-btn::after { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg,#ffffff20 0%,transparent 60%); pointer-events: none; }
+  .setup-btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
+  .setup-btn:active { transform: translateY(0); }
+  .setup-btn:disabled { background: var(--surface2); color: var(--text-3); cursor: not-allowed; transform: none; filter: none; }
+  .setup-btn svg { width: 15px; height: 15px; }
 
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        extra = {
-            k: v for k, v in record.__dict__.items()
-            if k not in _LOG_RECORD_BUILTINS and not k.startswith("_")
-        }
-        out: dict = {
-            "ts":     datetime.now(timezone.utc).isoformat(),
-            "level":  record.levelname,
-            "msg":    record.getMessage(),
-            "logger": record.name,
-            **extra,
-        }
-        if record.exc_info and record.exc_info[0] is not None:
-            out["exception"] = self.formatException(record.exc_info)
-        return json.dumps(out, default=str)
+  .setup-spinner { width: 14px; height: 14px; border: 2px solid #0a0c0f40; border-top-color: #0a0c0f; border-radius: 50%; animation: spin .7s linear infinite; display: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
-def _setup_logging() -> logging.Logger:
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(_JsonFormatter())
-    logger = logging.getLogger("zoho_agent")
-    logger.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.WARNING))
-    logger.addHandler(handler)
-    logger.propagate = False
-    return logger
+  .setup-hint { font-size: 11px; font-family: var(--font-mono); color: var(--text-3); text-align: center; line-height: 1.6; }
 
-log = _setup_logging()
+  .setup-panel { display: flex; flex-direction: column; gap: 24px; }
+  .setup-panel.hidden { display: none; }
 
-# ---------------------------------------------------------------------------
-# Audit logger
-# ---------------------------------------------------------------------------
-class AuditLog:
-    def __init__(self, path: str) -> None:
-        self._path = Path(path)
-        self._fh = self._path.open("a", encoding="utf-8")
+  /* ── Shell ──────────────────────────────────────────────────── */
+  .shell { display: grid; grid-template-columns: 1fr; grid-template-rows: 100vh; height: 100vh; opacity: 0; pointer-events: none; transition: opacity .4s ease; }
+  .shell.visible { opacity: 1; pointer-events: all; }
 
-    def write(self, event: str, **kwargs: Any) -> None:
-        record = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "event": event,
-            **kwargs,
-        }
-        self._fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-        self._fh.flush()
+  /* Main */
+  .main { display: flex; flex-direction: column; height: 100vh; overflow: hidden; position: relative; background: var(--bg); }
+  .main::before { content: ''; position: absolute; inset: 0; background-image: linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px); background-size: 40px 40px; opacity: .18; pointer-events: none; z-index: 0; }
 
-    def close(self) -> None:
-        self._fh.close()
+  .header { position: relative; z-index: 10; padding: 0 28px; height: 56px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; background: var(--bg); flex-shrink: 0; }
+  .header-left { display: flex; align-items: center; gap: 12px; }
+  .header-title { font-size: 14px; font-weight: 600; color: var(--text-2); font-family: var(--font-mono); }
+  .header-title em { color: var(--text); font-style: normal; }
+  .header-right { display: flex; align-items: center; gap: 10px; }
+  .badge { font-family: var(--font-mono); font-size: 10px; padding: 3px 8px; border-radius: 100px; letter-spacing: .06em; font-weight: 500; }
+  .badge-model { background: var(--surface2); border: 1px solid var(--border-hi); color: var(--text-2); }
+  .badge-tools { background: var(--accent-dim); border: 1px solid var(--accent-glow); color: var(--accent); }
 
-# ---------------------------------------------------------------------------
-# Risky tool classification
-# ---------------------------------------------------------------------------
-RISKY_EXACT: frozenset[str] = frozenset({
-    "create_vendor_payment", "refund_excess_vendor_payment", "refund_vendor_credit",
-    "create_customer_payment_refund", "delete_contact", "delete_invoice",
-    "delete_bill", "delete_item", "delete_expense", "delete_customer_payment",
-    "delete_vendor_payment", "delete_account", "void_invoice", "void_bill",
-    "void_salesorder",
-})
-RISKY_SUBSTR: frozenset[str] = frozenset({"delete", "void", "write_off", "refund"})
+  .messages { flex: 1; overflow-y: auto; padding: 32px 0 24px; position: relative; z-index: 1; scrollbar-width: thin; scrollbar-color: var(--border) transparent; scroll-behavior: smooth; }
+  .messages-inner { max-width: 780px; margin: 0 auto; padding: 0 28px; display: flex; flex-direction: column; gap: 24px; }
 
-def is_risky(tool_name: str) -> bool:
-    ln = tool_name.lower()
-    return ln in RISKY_EXACT or any(s in ln for s in RISKY_SUBSTR)
+  .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 60vh; gap: 16px; text-align: center; animation: fade-up .5s ease both; }
+  .empty-glyph { width: 64px; height: 64px; background: var(--surface); border: 1px solid var(--border-hi); border-radius: 18px; display: flex; align-items: center; justify-content: center; color: var(--accent); margin-bottom: 4px; }
+  .empty-glyph svg { width: 32px; height: 32px; }
+  .empty-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -.03em; }
+  .empty-sub { font-size: 13.5px; color: var(--text-2); max-width: 380px; line-height: 1.7; font-family: var(--font-mono); }
+  .suggestions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; }
+  .suggestion-chip { padding: 8px 14px; background: var(--surface); border: 1px solid var(--border-hi); border-radius: 100px; font-size: 12.5px; color: var(--text-2); cursor: pointer; transition: var(--transition); font-family: var(--font-mono); }
+  .suggestion-chip:hover { background: var(--surface2); color: var(--text); border-color: var(--accent-glow); }
 
-def is_read_only(tool_name: str) -> bool:
-    ln = tool_name.lower()
-    return ln.startswith(("list_", "get_", "search_")) or "report" in ln
+  .msg { display: flex; gap: 12px; animation: fade-up .25s ease both; }
+  @keyframes fade-up { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
+  .msg-avatar { width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; margin-top: 2px; }
+  .msg.user { flex-direction: row-reverse; }
+  .msg.user .msg-avatar { background: var(--surface2); border: 1px solid var(--border-hi); color: var(--text-2); }
+  .msg.bot  .msg-avatar { background: var(--accent); color: #0a0c0f; box-shadow: 0 0 16px var(--accent-glow); }
+  .msg-body { flex: 1; min-width: 0; }
+  .msg-meta { font-size: 10.5px; font-family: var(--font-mono); color: var(--text-3); margin-bottom: 5px; display: flex; align-items: center; gap: 8px; }
+  .msg.user .msg-meta { flex-direction: row-reverse; }
+  .msg-tools { display: flex; gap: 4px; flex-wrap: wrap; }
+  .msg-tool-tag { font-size: 9.5px; padding: 1px 6px; background: var(--surface2); border: 1px solid var(--border-hi); border-radius: 4px; color: var(--accent); font-family: var(--font-mono); letter-spacing: .04em; }
+  .msg-bubble { padding: 13px 16px; border-radius: var(--radius); font-size: 14px; line-height: 1.7; max-width: 100%; }
+  .msg.user .msg-bubble { background: var(--user-bg); border: 1px solid var(--user-border); border-radius: var(--radius) var(--radius) 4px var(--radius); color: var(--text); font-family: var(--font-mono); font-size: 13.5px; }
+  .msg.bot  .msg-bubble { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius) var(--radius) var(--radius) 4px; color: var(--text); }
+  .msg.bot  .msg-bubble.has-table { padding: 10px 10px 10px 12px; }
+  .msg-bubble h3 { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); letter-spacing: .04em; text-transform: uppercase; }
+  .msg-bubble p { margin-bottom: 8px; color: var(--text-2); font-size: 13.5px; }
+  .msg-bubble p:last-child { margin-bottom: 0; }
+  .msg-bubble strong { color: var(--text); font-weight: 600; }
+  .msg-bubble em { color: var(--text-2); font-style: italic; }
+  .msg-bubble code { font-family: var(--font-mono); font-size: 12px; background: var(--surface2); border: 1px solid var(--border-hi); padding: 1px 5px; border-radius: 4px; color: var(--accent); }
+  .table-scroll { overflow-x: auto; overflow-y: visible; margin: 6px -4px; border-radius: var(--radius-sm); scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  .table-scroll::-webkit-scrollbar { height: 4px; }
+  .table-scroll::-webkit-scrollbar-track { background: transparent; }
+  .table-scroll::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 4px; }
+  .msg-bubble table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 11.5px; font-family: var(--font-mono); }
+  .msg-bubble thead tr { border-bottom: 1px solid var(--border-hi); }
+  .msg-bubble th { padding: 5px 10px; text-align: left; font-weight: 600; font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--text-3); white-space: nowrap; }
+  .msg-bubble td { padding: 5px 10px; color: var(--text-2); border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .msg-bubble tr:last-child td { border-bottom: none; }
+  .msg-bubble tr:hover td { background: var(--surface2); }
+  .table-footer-live { display: flex; align-items: center; gap: 8px; }
+  .table-loading-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-family: var(--font-mono); color: var(--accent); background: var(--accent-dim); border: 1px solid var(--accent-glow); border-radius: 100px; padding: 2px 8px; }
+  .table-loading-dot { width: 5px; height: 5px; background: var(--accent); border-radius: 50%; animation: typing-bounce .9s ease-in-out infinite; }
+  .table-loading-dot:nth-child(1){animation-delay:0s}
+  .table-loading-dot:nth-child(2){animation-delay:.15s}
+  .table-loading-dot:nth-child(3){animation-delay:.3s}
+  @keyframes row-in { from { opacity:0; background: var(--accent-dim); } to { opacity:1; background: transparent; } }
+  .msg-bubble tr.row-new td { animation: row-in .4s ease both; }
+  .answer-card { background: linear-gradient(135deg, #00e5b010, #00e5b005); border: 1px solid #00e5b040; border-radius: var(--radius-sm); padding: 16px 18px; margin: 4px 0; }
+  .answer-question { font-size: 11px; font-family: var(--font-mono); color: var(--text-3); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 8px; }
+  .answer-value { font-size: 20px; font-weight: 700; color: var(--accent); font-family: var(--font-sans); letter-spacing: -.02em; line-height: 1.3; margin-bottom: 10px; }
+  .answer-breakdown { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 2px; }
+  .answer-breakdown-row { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+  .answer-breakdown-label { font-size: 11.5px; font-family: var(--font-mono); color: var(--text-3); }
+  .answer-breakdown-val   { font-size: 12px; font-family: var(--font-mono); color: var(--text-2); text-align: right; }
+  .answer-note { font-size: 11px; color: var(--text-3); font-style: italic; margin-top: 8px; font-family: var(--font-mono); }
+  .cell-overdue { color: #ff4e6a; font-weight: 600; }
+  .cell-paid    { color: var(--accent); }
+  .cell-open    { color: var(--amber); }
+  .cell-draft   { color: var(--text-3); }
+  .cell-void    { color: var(--text-3); text-decoration: line-through; }
+  .detail-card { background: var(--surface2); border: 1px solid var(--border-hi); border-radius: var(--radius-sm); overflow: hidden; }
+  .detail-card-title { padding: 10px 14px; font-size: 11px; font-family: var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); border-bottom: 1px solid var(--border); background: var(--surface); }
+  .detail-card-rows { display: flex; flex-direction: column; }
+  .detail-row { display: flex; padding: 8px 14px; border-bottom: 1px solid var(--border); gap: 12px; align-items: baseline; }
+  .detail-row:last-child { border-bottom: none; }
+  .detail-label { font-size: 11px; font-family: var(--font-mono); color: var(--text-3); min-width: 110px; flex-shrink: 0; text-transform: uppercase; letter-spacing: .05em; }
+  .detail-value { font-size: 13px; color: var(--text); word-break: break-word; }
+  .status-block { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border-radius: var(--radius-sm); border: 1px solid; }
+  .status-block.ok   { background: #00e5b00a; border-color: #00e5b030; }
+  .status-block.err  { background: var(--red-dim); border-color: #ff4e6a30; }
+  .status-icon { width: 18px; height: 18px; flex-shrink: 0; margin-top: 1px; }
+  .status-block.ok  .status-icon { color: var(--accent); }
+  .status-block.err .status-icon { color: var(--red); }
+  .status-headline { font-size: 13.5px; font-weight: 600; color: var(--text); }
+  .status-detail   { font-size: 12px; color: var(--text-2); margin-top: 3px; font-family: var(--font-mono); }
+  .confirm-card { background: var(--amber-dim); border: 1px solid #ffb34740; border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .confirm-header { display: flex; gap: 10px; align-items: flex-start; }
+  .confirm-icon { color: var(--amber); flex-shrink: 0; margin-top: 1px; }
+  .confirm-text { font-size: 13.5px; color: var(--text); line-height: 1.6; }
+  .confirm-actions { display: flex; gap: 8px; }
+  .confirm-btn { padding: 7px 18px; border-radius: var(--radius-sm); border: 1px solid; font-family: var(--font-sans); font-size: 12.5px; font-weight: 600; cursor: pointer; transition: var(--transition); letter-spacing: .02em; }
+  .confirm-yes { background: var(--amber); border-color: var(--amber); color: #0a0c0f; }
+  .confirm-yes:hover { filter: brightness(1.1); }
+  .confirm-no  { background: transparent; border-color: var(--border-hi); color: var(--text-2); }
+  .confirm-no:hover { background: var(--surface2); color: var(--text); }
+  .typing-indicator { display: flex; align-items: center; gap: 5px; padding: 14px 16px; }
+  .typing-dot { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; animation: typing-bounce .9s ease-in-out infinite; opacity: .4; }
+  .typing-dot:nth-child(1) { animation-delay:0s; }
+  .typing-dot:nth-child(2) { animation-delay:.15s; }
+  .typing-dot:nth-child(3) { animation-delay:.3s; }
+  @keyframes typing-bounce { 0%,60%,100% { transform:translateY(0); opacity:.4; } 30% { transform:translateY(-6px); opacity:1; } }
+  .stream-cursor { display: inline-block; width: 8px; height: 14px; background: var(--accent); border-radius: 1px; margin-left: 2px; vertical-align: middle; animation: blink .8s step-end infinite; }
+  @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:0;} }
+  .input-area { position: relative; z-index: 10; padding: 16px 28px 20px; border-top: 1px solid var(--border); background: var(--bg); flex-shrink: 0; }
+  .input-wrapper { max-width: 780px; margin: 0 auto; position: relative; }
+  .input-box { width: 100%; background: var(--surface); border: 1px solid var(--border-hi); border-radius: var(--radius); padding: 14px 52px 14px 18px; font-family: var(--font-mono); font-size: 13.5px; color: var(--text); resize: none; outline: none; transition: border-color var(--transition),box-shadow var(--transition); line-height: 1.6; min-height: 52px; max-height: 180px; overflow-y: auto; scrollbar-width: none; }
+  .input-box::placeholder { color: var(--text-3); }
+  .input-box:focus { border-color: var(--accent-glow); box-shadow: 0 0 0 3px var(--accent-dim); }
+  .send-btn { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); width: 34px; height: 34px; border-radius: 8px; background: var(--accent); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: var(--transition); color: #0a0c0f; }
+  .send-btn:hover { filter: brightness(1.1); }
+  .send-btn:disabled { background: var(--surface2); color: var(--text-3); cursor: not-allowed; }
+  .send-btn svg { width: 16px; height: 16px; }
+  .input-hint { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; max-width: 780px; margin-left: auto; margin-right: auto; }
+  .input-hint-left { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); display: flex; gap: 16px; }
+  .input-hint-right { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); }
+  .hint-key { background: var(--surface2); border: 1px solid var(--border-hi); border-radius: 3px; padding: 0 4px; font-size: 10px; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+  .elapsed { font-size: 10px; font-family: var(--font-mono); color: var(--text-3); margin-left: 4px; }
+  .toast { position: fixed; bottom: 90px; right: 24px; background: var(--red-dim); border: 1px solid #ff4e6a30; border-radius: var(--radius-sm); padding: 10px 16px; font-size: 12.5px; font-family: var(--font-mono); color: var(--red); max-width: 320px; z-index: 999; display: none; }
+  .toast.show { display: block; animation: toast-in .2s ease both; }
+  @keyframes toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+  @media (max-width: 760px) { .messages-inner,.input-wrapper,.input-hint { padding: 0 16px; } .header { padding: 0 16px; } }
+</style>
+</head>
+<body>
 
-# ---------------------------------------------------------------------------
-# Circuit breaker (per tool)
-# ---------------------------------------------------------------------------
-@dataclass
-class CircuitBreaker:
-    failures: int = 0
-    opened_at: Optional[float] = None
+<!-- ── Setup Modal ────────────────────────────────────────────── -->
+<div class="setup-overlay" id="setupOverlay">
+  <div class="setup-card">
 
-    def is_open(self) -> bool:
-        if self.opened_at is None:
-            return False
-        if time.monotonic() - self.opened_at > CIRCUIT_BREAK_RESET_S:
-            self.failures = 0
-            self.opened_at = None
-            return False
-        return True
+    <div class="setup-brand">
+      <div class="setup-brand-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+        </svg>
+      </div>
+      <div>
+        <div class="setup-brand-name">Zoho Books AI</div>
+        <div class="setup-brand-sub" id="setupSubtitle">Connect your MCP server</div>
+      </div>
+    </div>
 
-    def record_failure(self) -> None:
-        self.failures += 1
-        if self.failures >= CIRCUIT_BREAK_THRESHOLD:
-            self.opened_at = time.monotonic()
-            log.warning("circuit_breaker_opened", extra={"failures": self.failures})
+    <!-- Step pills -->
+    <div class="setup-steps">
+      <div class="setup-step-pill active" id="pill1">
+        <div class="setup-step-num" id="num1">1</div>MCP Server
+      </div>
+      <div class="setup-step-sep"></div>
+      <div class="setup-step-pill" id="pill2">
+        <div class="setup-step-num" id="num2">2</div>Organisation
+      </div>
+    </div>
 
-    def record_success(self) -> None:
-        self.failures = 0
-        self.opened_at = None
+    <div class="setup-divider"></div>
 
-_circuit_breakers: dict[str, CircuitBreaker] = defaultdict(CircuitBreaker)
+    <!-- Panel 1: MCP URL -->
+    <div class="setup-panel" id="panel1">
+      <div class="setup-field">
+        <label class="setup-label" for="mcpUrlInput">MCP Server URL</label>
+        <input id="mcpUrlInput" class="setup-input" type="url"
+          placeholder="https://your-mcp-server.com/mcp"
+          autocomplete="off" spellcheck="false"
+          onkeydown="if(event.key==='Enter')connectMcp()"
+          oninput="clearErr(1)" />
+        <div class="setup-error" id="err1"></div>
+      </div>
+      <button class="setup-btn" id="btn1" onclick="connectMcp()">
+        <div class="setup-spinner" id="spin1"></div>
+        <svg id="icon1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        <span id="lbl1">Connect</span>
+      </button>
+      <div class="setup-hint">The URL is stored for this browser session only<br>and sent with every request to the API.</div>
+    </div>
 
-# ---------------------------------------------------------------------------
-# Retry helper
-# ---------------------------------------------------------------------------
-async def retry_async(
-    coro_fn,
-    *args,
-    retries: int = 3,
-    base_delay: float = 1.0,
-    retryable_exceptions: tuple = (httpx.TransportError, asyncio.TimeoutError),
-    label: str = "op",
-    **kwargs,
-) -> Any:
-    last_exc: Exception = RuntimeError("no attempts made")
-    for attempt in range(retries):
-        try:
-            return await coro_fn(*args, **kwargs)
-        except retryable_exceptions as exc:
-            last_exc = exc
-            wait = base_delay * (2 ** attempt)
-            log.warning("retry", extra={"label": label, "attempt": attempt + 1,
-                                        "wait_s": wait, "error": str(exc)})
-            await asyncio.sleep(wait)
-        except Exception:
-            raise
-    raise last_exc
+    <!-- Panel 2: Org ID -->
+    <div class="setup-panel hidden" id="panel2">
+      <div class="setup-field">
+        <label class="setup-label" for="orgIdInput">Zoho Organisation ID</label>
+        <input id="orgIdInput" class="setup-input" type="text"
+          placeholder="e.g. 60065733225"
+          autocomplete="off" spellcheck="false" inputmode="numeric"
+          onkeydown="if(event.key==='Enter')submitOrg()"
+          oninput="clearErr(2)" />
+        <div class="setup-error" id="err2"></div>
+        <div class="setup-label-hint">Find your Organisation ID in Zoho Books under<br>Settings → Organisation Profile.</div>
+      </div>
+      <button class="setup-btn" id="btn2" onclick="submitOrg()">
+        <div class="setup-spinner" id="spin2"></div>
+        <svg id="icon2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>
+        <span id="lbl2">Start chatting</span>
+      </button>
+      <div class="setup-hint">Your organisation ID is sent with every request<br>and only stored in this browser session.</div>
+    </div>
 
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-@dataclass
-class ToolMeta:
-    name: str
-    desc: str
-    required: list[str]
-    allowed: list[str]
-    body_key: Optional[str]
-    body_required: list[str]
-    schema_compact: dict
-    read_only: bool = False
+  </div>
+</div>
 
-    def to_planner_dict(self) -> dict:
-        return {
-            "desc":      self.desc,
-            "required":  self.required,
-            "allowed":   self.allowed[:40],
-            "schema":    self.schema_compact,
-            "read_only": self.read_only,
-        }
+<!-- ── Shell ─────────────────────────────────────────────────── -->
+<div class="shell" id="shell">
+  <main class="main">
+    <div class="header">
+      <div class="header-left">
+        <div class="header-title"><em>Zoho Books</em> / AI Assistant</div>
+      </div>
+      <div class="header-right">
+        <span class="badge badge-model" id="modelBadge">gemini-2.5-flash</span>
+        <span class="badge badge-tools" id="toolsBadge">— tools</span>
+      </div>
+    </div>
 
+    <div class="messages" id="messagesEl">
+      <div class="messages-inner" id="messagesInner">
+        <div class="empty-state" id="emptyState">
+          <div class="empty-glyph">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="3" y="4" width="18" height="16" rx="2"/>
+              <path d="M8 8h8M8 12h5"/><path d="M16 16l3 3"/><circle cx="16" cy="14" r="3"/>
+            </svg>
+          </div>
+          <div class="empty-title">What can I help with?</div>
+          <div class="empty-sub">Ask me anything about your Zoho Books data — invoices, bills, contacts, payments, reports, and more.</div>
+          <div class="suggestions">
+            <span class="suggestion-chip" onclick="sendSuggestion(this)">List unpaid bills</span>
+            <span class="suggestion-chip" onclick="sendSuggestion(this)">Create an invoice</span>
+            <span class="suggestion-chip" onclick="sendSuggestion(this)">Show aged receivables</span>
+            <span class="suggestion-chip" onclick="sendSuggestion(this)">List all contacts</span>
+            <span class="suggestion-chip" onclick="sendSuggestion(this)">Create a bill</span>
+            <span class="suggestion-chip" onclick="sendSuggestion(this)">Show P&L report</span>
+          </div>
+        </div>
+      </div>
+    </div>
 
-@dataclass
-class AgentState:
-    organization_id: Optional[str] = None
-    pending_intent: Optional[str] = None
-    pending_question: Optional[str] = None
-    extra: dict = field(default_factory=dict)
+    <div class="input-area">
+      <div class="input-wrapper">
+        <textarea id="inputBox" class="input-box"
+          placeholder="Ask about invoices, bills, contacts, payments…"
+          rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+        <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send (Enter)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M22 2L11 13M22 2L15 22l-4-9-9-4 20-7z"/>
+          </svg>
+        </button>
+      </div>
+      <div class="input-hint">
+        <div class="input-hint-left">
+          <span><span class="hint-key">Enter</span> send</span>
+          <span><span class="hint-key">Shift+Enter</span> new line</span>
+        </div>
+        <div class="input-hint-right" id="charCount"></div>
+      </div>
+    </div>
+  </main>
+</div>
 
-    def to_dict(self) -> dict:
-        d: dict = {}
-        if self.organization_id:  d["organization_id"] = self.organization_id
-        if self.pending_intent:   d["pending_intent"]  = self.pending_intent
-        if self.pending_question: d["pending_question"] = self.pending_question
-        d.update(self.extra)
-        return d
+<div class="toast" id="toast"></div>
 
-    def update_from_dict(self, data: dict) -> None:
-        for k, v in data.items():
-            if v in (None, ""):
-                continue
-            if k == "organization_id":  self.organization_id = str(v)
-            elif k == "pending_intent":   self.pending_intent  = str(v)
-            elif k == "pending_question": self.pending_question = str(v)
-            else:                         self.extra[k] = v
+<script>
+const API_BASE = window.location.origin;
 
-    def clear_workflow(self) -> None:
-        self.pending_intent  = None
-        self.pending_question = None
-
-
-# ---------------------------------------------------------------------------
-# Schema helpers
-# ---------------------------------------------------------------------------
-def compact_schema(schema: dict, max_props: int = MAX_TOOL_PROPS) -> dict:
-    if not schema:
-        return {}
-    props    = schema.get("properties") or {}
-    req      = schema.get("required") or []
-    keys     = list(props.keys())[:max_props]
-    overflow = len(props) - len(keys)
-    slim     = {k: {"type": props[k].get("type")} if isinstance(props[k], dict) else {}
-                for k in keys}
-    out: dict = {"type": schema.get("type"), "required": [k for k in req if k in slim],
-                 "properties": slim}
-    if overflow > 0:
-        out["_truncated"] = overflow
-    return out
-
-
-def build_tool_catalog(list_tools_result: Any) -> dict[str, ToolMeta]:
-    catalog: dict[str, ToolMeta] = {}
-    for t in list_tools_result.tools:
-        schema   = t.inputSchema or {}
-        props    = schema.get("properties") or {}
-        required = schema.get("required") or []
-        allowed  = sorted(props.keys())
-
-        body_key: Optional[str] = None
-        body_required: list[str] = []
-        for key in ("body", "JSONString"):
-            if key in props and isinstance(props[key], dict):
-                body_key      = key
-                body_required = props[key].get("required") or []
-                break
-
-        catalog[t.name] = ToolMeta(
-            name           = t.name,
-            desc           = (t.description or "").strip()[:160],
-            required       = [k for k in required if k in props],
-            allowed        = allowed,
-            body_key       = body_key,
-            body_required  = body_required,
-            schema_compact = compact_schema(schema),
-            read_only      = is_read_only(t.name),
-        )
-    log.info("catalog_built", extra={"tool_count": len(catalog)})
-    return catalog
+// ── State ────────────────────────────────────────────────────────
+let mcpUrl      = null;
+let orgId       = null;
+let sessionId   = null;
+let isStreaming  = false;
 
 
-def validate_args(meta: ToolMeta, args: dict) -> tuple[list[str], list[str]]:
-    allowed_set = set(meta.allowed)
-    unknown     = [k for k in args if k not in allowed_set]
-    missing: list[str] = []
+// ── DOM ──────────────────────────────────────────────────────────
+const messagesEl    = document.getElementById('messagesEl');
+const messagesInner = document.getElementById('messagesInner');
+const emptyState    = document.getElementById('emptyState');
+const inputBox      = document.getElementById('inputBox');
+const sendBtn       = document.getElementById('sendBtn');
+const sessionDisp   = document.getElementById('sessionDisplay');
+const connStatus    = document.getElementById('connectionStatus');
 
-    for k in meta.required:
-        if k not in args or args.get(k) in (None, "", []):
-            missing.append(k)
+// ── Setup helpers ─────────────────────────────────────────────────
+function clearErr(n) {
+  document.getElementById(`err${n}`).classList.remove('show');
+  document.getElementById(n === 1 ? 'mcpUrlInput' : 'orgIdInput').classList.remove('error');
+}
+function showErr(n, msg) {
+  const el = document.getElementById(`err${n}`);
+  el.textContent = msg; el.classList.add('show');
+  document.getElementById(n === 1 ? 'mcpUrlInput' : 'orgIdInput').classList.add('error');
+}
+function btnLoading(n, loading, loadLabel) {
+  const btn = document.getElementById(`btn${n}`);
+  const sp  = document.getElementById(`spin${n}`);
+  const ic  = document.getElementById(`icon${n}`);
+  const lb  = document.getElementById(`lbl${n}`);
+  btn.disabled = loading;
+  sp.style.display = loading ? 'block' : 'none';
+  ic.style.display = loading ? 'none'  : 'block';
+  lb.textContent   = loading ? loadLabel : (n === 1 ? 'Connect' : 'Start chatting');
+}
 
-    if meta.body_key and meta.body_key in args and meta.body_required:
-        raw = args[meta.body_key]
-        try:
-            body = raw if isinstance(raw, dict) else json.loads(raw or "{}")
-        except Exception:
-            body = {}
-        for bk in meta.body_required:
-            if bk not in body or body.get(bk) in (None, "", []):
-                missing.append(f"{meta.body_key}.{bk}")
+// ── Step 1: MCP connect ──────────────────────────────────────────
+async function connectMcp() {
+  const input = document.getElementById('mcpUrlInput');
+  const url   = input.value.trim();
+  if (!url) { showErr(1, 'MCP URL is required.'); input.focus(); return; }
+  try { new URL(url); } catch { showErr(1, 'Please enter a valid URL (include https://).'); input.focus(); return; }
 
-    return unknown, missing
+  btnLoading(1, true, 'Connecting…');
+
+  // Best-effort health check — don't block on failure
+  try {
+    const r = await fetch(`${API_BASE}/health`);
+    if (r.ok) {
+      const d = await r.json();
+      document.getElementById('modelBadge').textContent = d.model || 'gemini';
+    }
+  } catch {
+    connStatus.textContent = 'Offline?';
+    connStatus.style.color = 'var(--amber)';
+  }
+
+  mcpUrl = url;
+  document.getElementById('mcpUrlDisplay').textContent = truncateUrl(url);
+  btnLoading(1, false, '');
+
+  // Advance to step 2
+  const pill1 = document.getElementById('pill1'), num1 = document.getElementById('num1');
+  pill1.classList.remove('active'); pill1.classList.add('done');
+  num1.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="11" height="11"><path d="M20 6L9 17l-5-5"/></svg>`;
+  document.getElementById('pill2').classList.add('active');
+  document.getElementById('panel1').classList.add('hidden');
+  document.getElementById('panel2').classList.remove('hidden');
+  document.getElementById('setupSubtitle').textContent = 'Enter your Organisation ID';
+  setTimeout(() => document.getElementById('orgIdInput').focus(), 80);
+}
+
+// ── Step 2: Org ID ────────────────────────────────────────────────
+function submitOrg() {
+  const input = document.getElementById('orgIdInput');
+  const val   = input.value.trim();
+  if (!val) { showErr(2, 'Organisation ID is required.'); input.focus(); return; }
+  if (!/^\d{4,}$/.test(val)) { showErr(2, 'Must be a numeric ID (e.g. 60065733225).'); input.focus(); return; }
+
+  orgId = val;
+  document.getElementById('orgIdDisplay').textContent = orgId;
+
+  btnLoading(2, true, 'Starting…');
+  setTimeout(() => {
+    document.getElementById('setupOverlay').classList.add('hidden');
+    document.getElementById('shell').classList.add('visible');
+    if (connStatus.textContent !== 'Offline?') {
+      connStatus.textContent = 'Connected';
+      connStatus.style.color = 'var(--accent)';
+    }
+    btnLoading(2, false, '');
+    inputBox.focus();
+  }, 280);
+}
+
+function truncateUrl(url) {
+  try { const u = new URL(url); const h = u.hostname; return h.length > 28 ? h.slice(0,26)+'…' : h; }
+  catch { return url.slice(0,28); }
+}
+
+// ── Chat helpers ─────────────────────────────────────────────────
+function newChat() {
+  sessionId = null;
+  sessionDisp.textContent = '—';
+  messagesInner.innerHTML = '';
+  messagesInner.appendChild(emptyState);
+  emptyState.style.display = 'flex';
+  inputBox.value = '';
+  autoResize(inputBox);
+}
 
 
-# ---------------------------------------------------------------------------
-# Memory — summarize-before-evict, full result storage
-# ---------------------------------------------------------------------------
-def _estimate_tokens(obj: Any) -> int:
-    return max(1, len(json.dumps(obj, default=str)) // 4)
 
+const escHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const sid6 = s => s ? s.slice(-6) : '—';
 
-MEMORY_SUMMARIZE_SYSTEM = """
-You are a memory compressor for a Zoho Books AI agent.
-You will receive a list of past tool call records (tool name, args, result, errors).
-Produce a single compact JSON object that preserves ALL facts the agent would need
-to continue the conversation: entity IDs, names, amounts, statuses, errors, and
-what actions were taken. Drop raw API payloads but keep all meaningful values.
+function showToast(msg, d=4000) {
+  const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), d);
+}
+function scrollBottom() { messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' }); }
+function autoResize(el) {
+  el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight,180)+'px';
+  const len = el.value.length;
+  document.getElementById('charCount').textContent = len > 0 ? `${len}/4000` : '';
+}
+function setLoading(v) { isStreaming = v; sendBtn.disabled = v; inputBox.disabled = v; }
+function handleKey(e) { if (e.key==='Enter'&&!e.shiftKey) { e.preventDefault(); sendMessage(); } }
+function sendSuggestion(el) { inputBox.value = el.textContent; autoResize(inputBox); sendMessage(); }
+function hideEmpty() { if (emptyState.parentNode) emptyState.style.display = 'none'; }
 
-Return ONLY this JSON shape — no prose, no markdown:
-{
-  "type": "summary",
-  "covers_entries": <integer count of entries summarised>,
-  "facts": {
-    "<entity_type>": [{"id": "...", "name": "...", "<key>": "<value>", ...}, ...],
-    "actions_taken": ["<verb> <entity> <id>", ...],
-    "errors": ["<brief description>", ...]
+// ── Message rendering ─────────────────────────────────────────────
+function appendUserMsg(text) {
+  hideEmpty();
+  const time = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  const div = document.createElement('div'); div.className = 'msg user';
+  div.innerHTML = `<div class="msg-avatar">U</div><div class="msg-body"><div class="msg-meta"><span>${time}</span></div><div class="msg-bubble">${escHtml(text)}</div></div>`;
+  messagesInner.appendChild(div); scrollBottom();
+}
+function appendTyping() {
+  hideEmpty();
+  const div = document.createElement('div'); div.className = 'msg bot'; div.id = 'typingIndicator';
+  div.innerHTML = `<div class="msg-avatar">Z</div><div class="msg-body"><div class="msg-bubble"><div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div></div></div>`;
+  messagesInner.appendChild(div); scrollBottom();
+}
+function replaceBotMsg(result, tools, elapsed) {
+  const existing = document.getElementById('typingIndicator');
+  const time = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  const toolTags = (tools||[]).slice(0,6).map(t=>`<span class="msg-tool-tag">${escHtml(t)}</span>`).join('');
+  const elHtml = elapsed ? `<span class="elapsed">${elapsed}ms</span>` : '';
+  const div = document.createElement('div'); div.className = 'msg bot';
+  div.innerHTML = `<div class="msg-avatar">Z</div><div class="msg-body"><div class="msg-meta"><span>${time}</span>${elHtml}${toolTags?`<div class="msg-tools">${toolTags}</div>`:''}</div><div class="msg-bubble" id="bb_${Date.now()}"></div></div>`;
+  if (existing) existing.replaceWith(div); else messagesInner.appendChild(div);
+  renderResult(div.querySelector('.msg-bubble'), result); scrollBottom();
+}
+function createStreamingBubble() {
+  const existing = document.getElementById('typingIndicator');
+  const div = document.createElement('div'); div.className = 'msg bot';
+  div.innerHTML = `<div class="msg-avatar">Z</div><div class="msg-body"><div class="msg-meta"><span>now</span></div><div class="msg-bubble"><span id="streamText"></span><span class="stream-cursor"></span></div></div>`;
+  if (existing) existing.replaceWith(div); else messagesInner.appendChild(div);
+  scrollBottom(); return div;
+}
+function renderResult(bubble, result) {
+  if (!result) { bubble.innerHTML = '<p>Done.</p>'; return; }
+  if (result.type==='confirm') { bubble.innerHTML = renderConfirm(result.confirm_text); return; }
+  if (result.type==='error')   { bubble.innerHTML = renderStatusBlock(false, result.reply||'Something went wrong.',''); return; }
+  const s = result.structured;
+  if (s) {
+    if (s.format==='table') bubble.classList.add('has-table');
+    bubble.innerHTML = renderStructured(s);
+  }
+  else if (result.reply) bubble.innerHTML = markdownToHtml(result.reply);
+  else bubble.innerHTML = '<p>Done.</p>';
+}
+function renderAnswer(d) {
+  const q=d.question||'', a=d.answer||'Done.', bd=d.breakdown||[], note=d.note||'';
+  const bdHtml=bd.length?`<div class="answer-breakdown">${bd.map(([l,v])=>`<div class="answer-breakdown-row"><span class="answer-breakdown-label">${escHtml(l)}</span><span class="answer-breakdown-val">${escHtml(String(v))}</span></div>`).join('')}</div>`:'';
+  const noteHtml=note?`<div class="answer-note">${escHtml(note)}</div>`:'';
+  return `<div class="answer-card">${q?`<div class="answer-question">${escHtml(q)}</div>`:''}<div class="answer-value">${escHtml(a)}</div>${bdHtml}${noteHtml}</div>`;
+}
+function renderStructured(d) {
+  const f = d.format||'status';
+  if (f==='answer') return renderAnswer(d);
+  if (f==='table') return renderTable(d);
+  if (f==='panel') return renderPanel(d);
+  return renderStatusBlock(d.ok!==false, d.headline||'Done.', d.detail||'');
+}
+function renderTable(d) {
+  const cols=d.columns||[],rows=d.rows||[],title=d.title||'',footer=d.footer||'';
+  const morePagesIncoming = d.__more_pages__;
+  const tableId = morePagesIncoming ? 'id="liveTable"' : '';
+  const ths=cols.map(c=>`<th>${escHtml(c)}</th>`).join('');
+  const trs=rows.map(r=>`<tr>${r.map(c=>`<td>${styleCell(String(c))}</td>`).join('')}</tr>`).join('');
+  const table=`<div class="table-scroll"><table ${tableId}><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
+  // If more pages are coming, show a live loading footer
+  const footerHtml = morePagesIncoming
+    ? `<div id="liveTableFooter" class="table-footer-live" style="margin-top:6px">
+        <span class="table-row-count" style="font-size:11px;font-family:var(--font-mono);color:var(--text-3)">${escHtml(footer||`${rows.length} records loaded`)}</span>
+        <span class="table-loading-pill"><span class="table-loading-dot"></span><span class="table-loading-dot"></span><span class="table-loading-dot"></span>loading more</span>
+       </div>`
+    : footer ? `<p style="margin-top:6px;font-size:11px;color:var(--text-3);font-family:var(--font-mono)">${escHtml(footer)}</p>` : '';
+  return `${title?`<h3>${escHtml(title)}</h3>`:''}${table}${footerHtml}`;
+}
+function styleCell(val) {
+  // Collapse newlines/multiline values into a single line
+  val = String(val).replace(/\n+/g,' ').replace(/\s{2,}/g,' ').trim();
+  const v=val.toLowerCase();
+  if (v.includes('overdue')||v.includes('due today')||v.includes('unpaid')) return `<span class="cell-overdue">${escHtml(val)}</span>`;
+  if (['paid','completed','accepted','closed'].includes(v)) return `<span class="cell-paid">${escHtml(val)}</span>`;
+  if (['open','pending','sent'].includes(v))   return `<span class="cell-open">${escHtml(val)}</span>`;
+  if (['draft'].includes(v))                   return `<span class="cell-draft">${escHtml(val)}</span>`;
+  if (['void','voided','cancelled','canceled'].includes(v)) return `<span class="cell-void">${escHtml(val)}</span>`;
+  return escHtml(val);
+}
+function renderPanel(d) {
+  const title=d.title||'Details',fields=d.fields||[],note=d.note||'';
+  const rows=fields.map(([l,v])=>`<div class="detail-row"><div class="detail-label">${escHtml(l)}</div><div class="detail-value">${styleCell(String(v))}</div></div>`).join('');
+  return `<div class="detail-card"><div class="detail-card-title">${escHtml(title)}</div><div class="detail-card-rows">${rows}</div></div>${note?`<p style="margin-top:8px;color:var(--text-3);font-size:12px;font-style:italic">${escHtml(note)}</p>`:''}`;
+}
+function renderStatusBlock(ok,headline,detail) {
+  const cls=ok?'ok':'err';
+  const icon=ok?`<svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>`
+               :`<svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>`;
+  return `<div class="status-block ${cls}">${icon}<div><div class="status-headline">${escHtml(headline)}</div>${detail?`<div class="status-detail">${escHtml(detail)}</div>`:''}</div></div>`;
+}
+function renderConfirm(text) {
+  return `<div class="confirm-card"><div class="confirm-header"><svg class="confirm-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><div class="confirm-text">${escHtml(text||'Confirm action?')}</div></div><div class="confirm-actions"><button class="confirm-btn confirm-yes" onclick="resolveConfirm(true)">Confirm</button><button class="confirm-btn confirm-no" onclick="resolveConfirm(false)">Cancel</button></div></div>`;
+}
+function markdownToHtml(md) {
+  if (!md) return '';
+  let h = escHtml(md);
+  h = h.replace(/^### (.+)$/gm,'<h3>$1</h3>');
+  h = h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+  h = h.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g,'<em>$1</em>');
+  h = h.replace(/`([^`]+)`/g,'<code>$1</code>');
+  if (h.includes('|')) h = renderMdTable(h);
+  h = h.split(/\n{2,}/).map(p=>{p=p.trim();if(!p||p.startsWith('<h')||p.startsWith('<table')||p.startsWith('<div'))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
+  return h;
+}
+function renderMdTable(html) {
+  return html.replace(/((?:\|.+\|\n?)+)/g, block=>{
+    const lines=block.trim().split('\n').filter(l=>l.trim());
+    if (lines.length<2) return block;
+    const isSep=l=>/^\|[\s\-:|]+\|/.test(l);
+    const parseRow=l=>l.replace(/^\||\|$/g,'').split('|').map(c=>c.trim());
+    const headers=parseRow(lines[0]);
+    const bodyLines=lines.filter((l,i)=>i>0&&!isSep(l));
+    const ths=headers.map(h=>`<th>${h}</th>`).join('');
+    const trs=bodyLines.map(l=>`<tr>${parseRow(l).map(c=>`<td>${styleCell(c)}</td>`).join('')}</tr>`).join('');
+    return `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+  });
+}
+
+// ── Confirm ──────────────────────────────────────────────────────
+async function resolveConfirm(answer) {
+  if (!sessionId) return;
+  document.querySelectorAll('.confirm-card').forEach(c=>c.closest('.msg')?.classList.add('resolving'));
+  setLoading(true); appendTyping();
+  try {
+    const r = await fetch(`${API_BASE}/confirm`,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sessionId,answer,mcp_url:mcpUrl})});
+    const data = await r.json();
+    replaceBotMsg(data, data.tools_used, data.elapsed_ms);
+  } catch(err) {
+    replaceBotMsg({type:'error',reply:'Network error: '+err.message},[],0);
+    showToast('Connection failed');
+  } finally {
+    setLoading(false);
+    document.querySelectorAll('.resolving').forEach(el=>el.remove());
   }
 }
-""".strip()
+
+// ── Send ─────────────────────────────────────────────────────────
+async function sendMessage() {
+  const text = inputBox.value.trim();
+  if (!text||isStreaming) return;
+  inputBox.value=''; autoResize(inputBox); setLoading(true);
 
 
-async def summarize_memory_async(
-    client: genai.Client,
-    entries: list[dict],
-    cid: str = "",
-) -> dict:
-    prompt = "Compress these memory entries:\n" + json.dumps(entries, default=str)
-    try:
-        raw     = await _stream_collect_json(client, prompt, MEMORY_SUMMARIZE_SYSTEM, cid)
-        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
-        parsed  = json.loads(cleaned)
-        parsed["covers_entries"] = len(entries)
-        log.info("memory_summarized", extra={"entries": len(entries), "cid": cid})
-        return parsed
-    except Exception as exc:
-        log.warning("memory_summarize_failed", extra={"error": str(exc), "cid": cid})
-        actions, errors = [], []
-        for e in entries:
-            if e.get("tool"): actions.append(e["tool"])
-            if "error" in e:  errors.append(str(e["error"])[:120])
-        return {"type": "summary", "covers_entries": len(entries),
-                "facts": {"actions_taken": actions, "errors": errors}}
-
-
-def add_memory(
-    memory: list[dict],
-    entry: dict,
-    gemini_client: Optional[Any] = None,
-    cid: str = "",
-) -> Optional[asyncio.Task]:
-    """
-    Append a full entry to memory. When over-budget, summarise the oldest half
-    via Gemini (async fire-and-forget) instead of blindly evicting.
-    Falls back to eviction when no Gemini client is available.
-    """
-    memory.append(entry)
-
-    total_tokens = sum(_estimate_tokens(m) for m in memory)
-    over_entries = len(memory) > MAX_MEMORY_ENTRIES
-    over_tokens  = total_tokens > MAX_MEMORY_TOKENS
-
-    if not (over_entries or over_tokens):
-        return None
-
-    # Strategy 1: async summarisation
-    if gemini_client is not None:
-        split        = len(memory) // 2
-        to_summarize = memory[:split]
-        del memory[:split]
-
-        async def _do_summarize() -> None:
-            summary = await summarize_memory_async(gemini_client, to_summarize, cid)
-            memory.insert(0, summary)
-
-        try:
-            task = asyncio.get_running_loop().create_task(_do_summarize())
-            return task
-        except RuntimeError:
-            pass  # no running loop — fall through
-
-    # Strategy 2: eviction fallback
-    while len(memory) > max(4, MAX_MEMORY_ENTRIES):
-        memory.pop(0)
-    while len(memory) > 4 and sum(_estimate_tokens(m) for m in memory) > MAX_MEMORY_TOKENS:
-        memory.pop(0)
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Planner
-# ---------------------------------------------------------------------------
-PLANNER_SYSTEM = """
-You are a Zoho Books automation agent. You decide which MCP tools to call and with what arguments.
-
-INPUT (JSON):
-  TOOLBOX  — tool_name → {desc, required, allowed, schema, read_only}
-  STATE    — persisted values (organization_id, pending_intent, etc.)
-  MEMORY   — recent tool call history, results, and errors
-  USER     — the user's latest message
-
-RULES:
-1. NEVER invent or guess IDs. Look them up with list/get tools first if not in STATE or MEMORY.
-2. Only use argument keys present in a tool's "allowed" list.
-3. STATE.organization_id is always set — inject it automatically; never ask for it.
-4. For body/JSONString fields, pass valid JSON constructed from context.
-5. When collecting missing fields for a multi-step operation, do NOT call any tool — only ask.
-6. When MEMORY contains a schema_error, fix the tool call using only allowed keys.
-7. If a required entity (contact, item, etc.) is missing, ask the user to confirm creation.
-8. For independent read-only steps (read_only: true), they may run in parallel.
-9. Continue the active workflow until complete; never ask "What would you like to do?" mid-workflow.
-10. Mark pending_intent in save{} when starting a multi-step workflow so context survives turns.
-
-PAGINATION & FILTERING — MANDATORY RULES (follow these on every list call):
-- ALWAYS pass per_page=100 on every list/search tool call. This is the page size — the system
-  will automatically fetch all remaining pages for you, so you never need to set page=2 yourself.
-- ALWAYS apply the narrowest possible status filter based on the user's intent:
-    "pending payments to receive" / "outstanding" / "unpaid invoices" → status=unpaid
-    "overdue" → status=overdue
-    "paid invoices" → status=paid
-    "pending bills to pay" / "unpaid bills" → status=unpaid
-    "draft invoices" → status=draft
-    "all invoices" / "every invoice" / no status mentioned → omit the filter (fetches all)
-  If no status is obvious from context, omit the status filter entirely.
-- Never call a list tool without per_page=100.
-
-ANSWERING QUESTIONS vs LISTING DATA — critical distinction:
-- USER ASKS FOR A TOTAL / COUNT / SUM / AVERAGE / SUMMARY (e.g. "total amount to receive",
-  "how many overdue invoices", "what is my total payable"):
-    → Fetch filtered data (status=unpaid / status=overdue etc.) with per_page=100.
-    → Set the step "note" to the user's exact question so the summarizer knows to COMPUTE the answer.
-    → The summarizer will sum/count/aggregate from the raw records — do NOT just show a table.
-- USER ASKS TO LIST / SHOW / GET records → table is appropriate.
-- USER ASKS A SPECIFIC QUESTION about data → fetch it and answer the question directly in "note".
-- Always match response format to what the user actually asked for, not just what the tool returns.
-
-OUTPUT — one of exactly three forms (valid JSON only, no prose):
-
-A) Ask user for missing info:
-{"type":"ask","text":"<question>","save":{"key":"value"}}
-
-B) Execute tool steps:
-{"type":"plan","steps":[{"tool":"ToolName","args":{...},"note":"<user's question or intent — always set this>","parallel":false},...]}
-   The "note" is passed verbatim to the summarizer. Always populate it with the user's original question.
-
-C) Confirm before risky / irreversible action:
-{"type":"confirm","text":"<description + impact>","on_yes":{"type":"plan","steps":[...]},"on_no":{"type":"ask","text":"..."}}
-""".strip()
-
-
-def _slim_toolbox(toolbox: dict[str, ToolMeta], user_msg: str, memory: list[dict]) -> dict:
-    """
-    Return a trimmed toolbox for the planner.
-    Always include all tools but strip the heavy schema/allowed fields from
-    tools that are clearly irrelevant to the user message + recent memory.
-    This cuts planner payload by ~60-70% without losing decision quality.
-    """
-    # Keywords from user message and recent tool calls to identify relevant tools
-    user_lower = user_msg.lower()
-    recent_tools = {m.get("tool", "") for m in memory[-6:] if "tool" in m}
-
-    # Domain keywords → tool name substrings
-    DOMAIN_HINTS = [
-        ({"invoice", "invoic", "receivable", "receive", "customer payment"}, "invoice"),
-        ({"bill", "payable", "vendor payment", "pay vendor"}, "bill"),
-        ({"contact", "customer", "vendor", "supplier"}, "contact"),
-        ({"item", "product", "service", "inventory"}, "item"),
-        ({"expense"}, "expense"),
-        ({"payment"}, "payment"),
-        ({"credit", "credit note"}, "credit"),
-        ({"bank", "transaction", "reconcil"}, "bank"),
-        ({"report", "summary", "p&l", "profit", "balance sheet"}, "report"),
-        ({"account", "chart"}, "account"),
-        ({"tax", "gst"}, "tax"),
-        ({"estimate", "quote"}, "estimate"),
-        ({"purchase order", "po "}, "purchaseorder"),
-        ({"sales order", "so "}, "salesorder"),
-    ]
-
-    relevant_substrings: set[str] = set()
-    for keywords, tool_substr in DOMAIN_HINTS:
-        if any(kw in user_lower for kw in keywords):
-            relevant_substrings.add(tool_substr)
-
-    slim: dict = {}
-    for name, meta in toolbox.items():
-        name_lower = name.lower()
-        is_recent  = name in recent_tools
-        is_relevant = not relevant_substrings or any(s in name_lower for s in relevant_substrings)
-
-        if is_recent or is_relevant:
-            # Full detail for relevant/recently-used tools
-            slim[name] = meta.to_planner_dict()
-        else:
-            # Minimal stub for everything else — name + desc only so planner
-            # knows the tool exists but won't be tempted to use it
-            slim[name] = {"desc": meta.desc[:80], "read_only": meta.read_only}
-
-    return slim
-
-
-def _build_planner_payload(
-    toolbox: dict[str, ToolMeta],
-    state: AgentState,
-    memory: list[dict],
-    user_msg: str,
-) -> str:
-    return json.dumps(
-        {
-            "TOOLBOX": _slim_toolbox(toolbox, user_msg, memory),
-            "STATE":   state.to_dict(),
-            "MEMORY":  memory[-12:],   # last 12 entries is enough for planning
-            "USER":    user_msg,
-        },
-        ensure_ascii=False,
-        default=str,
-    )
-
-
-async def gemini_plan(
-    client: genai.Client,
-    toolbox: dict[str, ToolMeta],
-    state: AgentState,
-    memory: list[dict],
-    user_msg: str,
-    correlation_id: str = "",
-) -> dict:
-    payload = _build_planner_payload(toolbox, state, memory, user_msg)
-    log.debug("planner_request", extra={"cid": correlation_id, "payload_chars": len(payload)})
-
-    async def _call() -> dict:
-        resp = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=PLANNER_MODEL,   # can be a faster model than summarizer
-                contents=[types.Content(role="user", parts=[types.Part(text=payload)])],
-                config=types.GenerateContentConfig(
-                    system_instruction=PLANNER_SYSTEM,
-                    temperature=0.2,   # lower = more deterministic = faster
-                    response_mime_type="application/json",
-                    max_output_tokens=2048,  # plans are small; 8192 was wasteful
-                ),
-            ),
-            timeout=GEMINI_TIMEOUT,
-        )
-        return json.loads(resp.text or "{}")
-
-    try:
-        result = await retry_async(_call, retries=3, base_delay=1.5, label="gemini_plan")
-        log.debug("planner_response", extra={"cid": correlation_id, "type": result.get("type")})
-        return result
-    except Exception as exc:
-        log.error("planner_failed", extra={"cid": correlation_id, "error": str(exc),
-                                           "error_type": type(exc).__name__})
-        return {"type": "ask", "text": "I ran into a problem thinking through that. Please rephrase."}
-
-
-# ---------------------------------------------------------------------------
-# Summarizer
-# ---------------------------------------------------------------------------
-SUMMARIZE_SYSTEM = """
-You are a Zoho Books assistant. Given a tool call result and the user's original question, produce the most useful response.
-
-FIRST — read the USER_QUESTION field carefully:
-- If it asks for a TOTAL, SUM, COUNT, AVERAGE, or any aggregated number:
-    → Compute the answer from the raw data yourself (sum all balance/amount fields, count records, etc.)
-    → Respond with format "answer" — a direct, specific answer to the question.
-    → Also include a brief supporting table or summary if helpful.
-- If it asks to LIST or SHOW records → format "table".
-- If it asks about a SINGLE record → format "panel".
-- If it is a simple action confirmation → format "status".
-
-Return ONLY valid JSON in one of these shapes:
-
-For "answer" (aggregated/computed responses):
-{
-  "format": "answer",
-  "question": "<restate the user's question>",
-  "answer": "<direct answer, e.g. 'Total receivable: ₹12,45,678.90 across 47 invoices'>",
-  "breakdown": [["Label", "Value"], ...],
-  "note": "optional caveat or detail"
+  appendUserMsg(text);
+  appendTyping();
+  try { await streamChat(text); }
+  catch(err) { replaceBotMsg({type:'error',reply:'Network error: '+err.message},[],0); showToast('Connection failed. Is the server running?'); }
+  finally { setLoading(false); inputBox.focus(); }
 }
 
-For "table" (listing records):
-{
-  "format": "table",
-  "title": "string",
-  "columns": ["Col1", "Col2", ...],
-  "rows": [["val1", "val2", ...], ...],
-  "footer": "e.g. Showing all 47 invoices — Total balance: ₹X"
+// ── SSE stream — always sends org_id ─────────────────────────────
+async function streamChat(message) {
+  const resp = await fetch(`${API_BASE}/chat/stream`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      message,
+      session_id: sessionId||undefined,
+      mcp_url:    mcpUrl,
+      org_id:     orgId,      // ← always included
+    }),
+  });
+  if (!resp.ok) {
+    const err = await resp.text();
+    replaceBotMsg({type:'error',reply:`Server error ${resp.status}: ${err}`},[],0); return;
+  }
+  const reader=resp.body.getReader(), dec=new TextDecoder();
+  let buf='', streamDiv=null, streamSpan=null, streamText='', t0=Date.now();
+
+  while (true) {
+    const {value,done}=await reader.read(); if(done)break;
+    buf+=dec.decode(value,{stream:true});
+    const parts=buf.split('\n\n'); buf=parts.pop()??'';
+    for (const part of parts) {
+      const line=part.trim(); if(!line.startsWith('data:'))continue;
+      let evt; try{evt=JSON.parse(line.slice(5).trim());}catch{continue;}
+
+      if (evt.type==='token') {
+        if (!streamDiv) { streamDiv=createStreamingBubble(); streamSpan=streamDiv.querySelector('#streamText'); }
+        streamText+=evt.token||''; if(streamSpan)streamSpan.textContent=streamText; scrollBottom();
+      }
+      else if (evt.type==='done') {
+        const elapsed=Date.now()-t0;
+        if (evt.session_id) { sessionId=evt.session_id; sessionDisp.textContent=sid6(sessionId); // Bind session ID to active thread on first response
 }
-
-For "panel" (single record detail):
-{
-  "format": "panel",
-  "title": "string",
-  "fields": [["Label", "Value"], ...],
-  "note": "optional"
-}
-
-For "status" (action confirmation or error):
-{
-  "format": "status",
-  "ok": true,
-  "headline": "short one-line message",
-  "detail": "optional extra line"
-}
-
-CRITICAL RULES:
-- For "table": include EVERY record — never truncate. If 200 invoices, output all 200 rows.
-- For "answer": do the arithmetic yourself from the raw data. Never say "see the table above".
-  Sum every balance/amount field, count records, compute what was asked.
-- Currency: always include symbol (₹, $, Rs., etc.)
-- Dates: DD MMM YYYY format
-- Status values: capitalise (Open, Paid, Overdue, Draft, Void)
-- Overdue items: note "Overdue by X days" inline
-- No markdown bold (**), asterisks (*), or backticks in values
-- IDs: keep as-is
-- footer on tables must state total count AND total amount if applicable
-""".strip()
-
-
-def _render_structured(data: dict) -> str:
-    fmt = data.get("format", "status")
-
-    if fmt == "answer":
-        # Direct answer to an aggregation/computation question
-        question  = data.get("question", "")
-        answer    = data.get("answer", "Done.")
-        breakdown = data.get("breakdown") or []
-        note      = data.get("note", "")
-        if RICH_AVAILABLE:
-            _print("")
-            if question:
-                _print(f"  [dim]{rich_escape(question)}[/dim]")
-            _print(f"\n  [bold green]{rich_escape(answer)}[/bold green]\n")
-            if breakdown:
-                for label, value in breakdown:
-                    _print(f"  [dim]{rich_escape(str(label))}:[/dim]  {rich_escape(str(value))}")
-            if note:
-                _print(f"\n  [dim italic]{rich_escape(note)}[/dim italic]")
-            _print("")
-        else:
-            print(f"\n{answer}")
-            for label, value in breakdown:
-                print(f"  {label}: {value}")
-            if note:
-                print(f"  ({note})")
-            print()
-        return answer
-
-    if fmt == "table" and RICH_AVAILABLE:
-        cols   = data.get("columns") or []
-        rows   = data.get("rows") or []
-        title  = data.get("title", "")
-        footer = data.get("footer", "")
-
-        tbl = Table(title=title, box=box.ROUNDED, show_header=True,
-                    header_style="bold cyan", border_style="bright_black",
-                    pad_edge=True, expand=False, show_lines=False)
-        for col in cols:
-            numeric = any(k in col.lower() for k in
-                          ("amount", "total", "balance", "qty", "price", "rate", "tax"))
-            tbl.add_column(col, justify="right" if numeric else "left", no_wrap=True)
-
-        for row in rows:
-            styled = []
-            for cell in row:
-                s  = str(cell)
-                sl = s.lower()
-                if any(w in sl for w in ("overdue", "due today", "unpaid", "⚠")):
-                    styled.append(f"[bold red]{rich_escape(s)}[/bold red]")
-                elif sl in ("paid", "completed", "accepted", "closed"):
-                    styled.append(f"[green]{rich_escape(s)}[/green]")
-                elif sl in ("open", "pending", "draft", "sent"):
-                    styled.append(f"[yellow]{rich_escape(s)}[/yellow]")
-                elif sl in ("void", "voided", "cancelled", "canceled"):
-                    styled.append(f"[dim]{rich_escape(s)}[/dim]")
-                else:
-                    styled.append(rich_escape(s))
-            tbl.add_row(*styled)
-
-        _print_raw(tbl)
-        if footer:
-            _print(f"  [dim]{footer}[/dim]")
-        _print("")
-        return title
-
-    elif fmt == "panel" and RICH_AVAILABLE:
-        title  = data.get("title", "Details")
-        fields = data.get("fields") or []
-        note   = data.get("note", "")
-        max_label = max((len(str(f[0])) for f in fields), default=10)
-        lines = []
-        for label, value in fields:
-            v  = str(value)
-            vl = v.lower()
-            if any(w in vl for w in ("overdue", "due today", "unpaid")):
-                v_styled = f"[bold red]{rich_escape(v)}[/bold red]"
-            elif vl in ("paid", "completed", "accepted"):
-                v_styled = f"[green]{rich_escape(v)}[/green]"
-            elif vl in ("open", "pending", "draft", "sent"):
-                v_styled = f"[yellow]{rich_escape(v)}[/yellow]"
-            elif vl in ("void", "voided"):
-                v_styled = f"[dim]{rich_escape(v)}[/dim]"
-            else:
-                v_styled = rich_escape(v)
-            lines.append(f"  [bold]{rich_escape(str(label).ljust(max_label))}[/bold]  {v_styled}")
-
-        body = "\n".join(lines)
-        if note:
-            body += f"\n\n  [dim italic]{rich_escape(note)}[/dim italic]"
-        _print_raw(Panel(body, title=f"[bold cyan]{rich_escape(title)}[/bold cyan]",
-                         border_style="bright_black", padding=(0, 1)))
-        _print("")
-        return title
-
-    else:
-        ok       = data.get("ok", True)
-        headline = str(data.get("headline", "Done."))
-        detail   = str(data.get("detail", ""))
-        if RICH_AVAILABLE:
-            icon = "[bold green]✓[/bold green]" if ok else "[bold yellow]![/bold yellow]"
-            _print(f"\n{icon}  {rich_escape(headline)}")
-            if detail:
-                _print(f"   [dim]{rich_escape(detail)}[/dim]")
-            _print("")
-        else:
-            print(f"\n{'✓' if ok else '!'} {headline}")
-            if detail:
-                print(f"  {detail}")
-            print()
-        return headline
-
-
-async def _stream_collect_json(
-    client: genai.Client,
-    prompt: str,
-    system: str,
-    cid: str,
-    timeout: Optional[float] = None,
-) -> str:
-    """Stream JSON tokens from Gemini, return full text. Falls back to non-streaming."""
-    effective_timeout = timeout or GEMINI_TIMEOUT
-    full = ""
-    try:
-        async with asyncio.timeout(effective_timeout):
-            async for chunk in await client.aio.models.generate_content_stream(
-                model=MODEL,
-                contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    temperature=0.1,
-                    response_mime_type="application/json",
-                    max_output_tokens=65536,
-                ),
-            ):
-                full += chunk.text or ""
-        return full
-    except Exception as exc:
-        log.warning("stream_collect_failed", extra={
-            "cid": cid, "error": str(exc),
-            "error_type": type(exc).__name__, "collected_chars": len(full)
-        })
-        resp = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=MODEL,
-                contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    temperature=0.1,
-                    response_mime_type="application/json",
-                    max_output_tokens=65536,
-                ),
-            ),
-            timeout=effective_timeout,
-        )
-        return resp.text or "{}"
-
-
-# Fields in Zoho API responses that add no display value but inflate payload size
-_ZOHO_NOISE_FIELDS: frozenset[str] = frozenset({
-    "created_time", "last_modified_time", "created_by", "last_modified_by",
-    "submitted_date", "submitted_by", "approved_date", "approved_by",
-    "color_code", "current_sub_status_id", "current_sub_status",
-    "template_id", "template_name", "template_type",
-    "is_viewed_by_client", "client_viewed_time",
-    "payment_made", "payment_expected_date",
-    "salesperson_id", "salesperson_name",
-    "shipping_charge", "adjustment", "write_off_amount",
-    "exchange_rate", "currency_id", "currency_code", "currency_symbol",
-    "documents", "attachments", "comments",
-    "page_context", "zcrm_potential_id", "zcrm_potential_name",
-    "salesorder_id", "purchaseorder_id", "estimate_id",
-    "source", "reference_number", "reason",
-    "ach_payment_initiated", "tax_rounding",
-    "is_emailed", "is_viewed_by_client", "is_inclusive_tax",
-    "payment_options", "line_item_total", "bcy_total", "bcy_balance",
-    "bcy_discount_total", "bcy_adjustment", "bcy_sub_total",
-})
-
-
-def _strip_noise(obj: Any, depth: int = 0) -> Any:
-    """Recursively strip noise fields from Zoho API response objects."""
-    if depth > 4:
-        return obj
-    if isinstance(obj, dict):
-        return {
-            k: _strip_noise(v, depth + 1)
-            for k, v in obj.items()
-            if k not in _ZOHO_NOISE_FIELDS
+        const fakeResult={type:'reply',structured:evt.structured,reply:streamText};
+        if (streamDiv) {
+          const bubble=streamDiv.querySelector('.msg-bubble');
+          const cursor=bubble.querySelector('.stream-cursor'); if(cursor)cursor.remove();
+          renderResult(bubble,fakeResult);
+          const meta=streamDiv.querySelector('.msg-meta');
+          const time=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+          const tools=(evt.tools_used||[]).slice(0,6).map(t=>`<span class="msg-tool-tag">${escHtml(t)}</span>`).join('');
+          if(meta)meta.innerHTML=`<span>${time}</span><span class="elapsed">${elapsed}ms</span>${tools?`<div class="msg-tools">${tools}</div>`:''}`;
         }
-    if isinstance(obj, list):
-        return [_strip_noise(i, depth + 1) for i in obj]
-    return obj
-
-
-def _safe_result_str(result: Any, char_limit: int = SUMMARIZE_INPUT_CHAR_LIMIT) -> str:
-    """
-    Serialize a tool result for Gemini.
-    1. Strip known Zoho noise fields first (cuts size 30-50%).
-    2. If still over limit, extract just the largest record array.
-    3. Hard-truncate only as last resort.
-    """
-    cleaned = _strip_noise(result)
-    full = json.dumps(cleaned, default=str, ensure_ascii=False)
-    if len(full) <= char_limit:
-        return full
-
-    # Try to find the largest array in the top-level dict
-    if isinstance(cleaned, dict):
-        best_key, best_arr = "", []
-        for k, v in cleaned.items():
-            if isinstance(v, list) and len(v) > len(best_arr):
-                best_key, best_arr = k, v
-        if best_arr:
-            trimmed = json.dumps({best_key: best_arr}, default=str, ensure_ascii=False)
-            if len(trimmed) <= char_limit:
-                log.info("result_trimmed_to_array",
-                         extra={"key": best_key, "rows": len(best_arr), "chars": len(trimmed)})
-                return trimmed
-
-    log.warning("result_hard_truncated",
-                extra={"original_chars": len(full), "limit": char_limit})
-    return full[:char_limit] + "\n...[TRUNCATED — partial result]"
-
-
-async def gemini_summarize(
-    client: genai.Client,
-    tool: str,
-    args: dict,
-    result: Any,
-    state: AgentState,
-    correlation_id: str = "",
-    user_question: str = "",
-) -> str:
-    result_str = _safe_result_str(result)
-    prompt = (
-        f"USER_QUESTION: {user_question or '(not specified — use best judgement on format)'}\n"
-        f"TOOL: {tool}\n"
-        f"ARGS: {json.dumps(args, default=str)}\n"
-        f"RESULT: {result_str}"
-    )
-    # Large results need more time — scale timeout with payload size
-    timeout = max(GEMINI_TIMEOUT, min(180.0, len(result_str) / 2000))
-    raw     = await _stream_collect_json(client, prompt, SUMMARIZE_SYSTEM,
-                                         correlation_id, timeout=timeout)
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
-    try:
-        data = json.loads(cleaned)
-        return _render_structured(data)
-    except Exception:
-        _print(f"\n[green]Assistant:[/green] {cleaned}\n")
-        return cleaned
-
-
-def normalize_plan(plan: Any) -> dict:
-    if isinstance(plan, list):
-        return {"type": "plan", "steps": plan}
-    if not isinstance(plan, dict):
-        return {"type": "ask", "text": "I couldn't understand the plan. Please rephrase."}
-    if "type" not in plan:
-        if "steps" in plan and isinstance(plan["steps"], list):
-            plan["type"] = "plan"
-        elif "text" in plan:
-            plan["type"] = "ask"
-        else:
-            plan["type"] = "ask"
-            plan["text"] = "I need a bit more detail to proceed."
-    return plan
-
-
-# ---------------------------------------------------------------------------
-# Auto-pagination helper
-# ---------------------------------------------------------------------------
-MAX_AUTOPAGINATE_PAGES: int = int(os.getenv("MAX_AUTOPAGINATE_PAGES", "20"))
-# List-tool name substrings that support pagination
-_PAGEABLE_TOOL_SUBSTRINGS = (
-    "list_invoices", "list_bills", "list_contacts", "list_items",
-    "list_expenses", "list_payments", "list_creditnotes", "list_estimates",
-    "list_salesorders", "list_purchaseorders", "list_transactions",
-    "list_bank", "list_journals", "search_invoices", "search_contacts",
-)
-
-
-def _is_pageable(tool_name: str) -> bool:
-    tl = tool_name.lower()
-    return any(sub in tl for sub in _PAGEABLE_TOOL_SUBSTRINGS)
-
-
-def _extract_records(result: Any) -> tuple[str, list]:
-    """Return (key, records_list) for the largest list in a Zoho result dict."""
-    if not isinstance(result, dict):
-        return "", []
-    best_key, best_arr = "", []
-    for k, v in result.items():
-        if isinstance(v, list) and len(v) > len(best_arr) and k != "page_context":
-            best_key, best_arr = k, v
-    return best_key, best_arr
-
-
-def _has_more_pages(result: Any) -> bool:
-    """Return True if the Zoho response indicates more pages exist."""
-    if not isinstance(result, dict):
-        return False
-    # page_context at top level
-    pc = result.get("page_context") or {}
-    if isinstance(pc, dict) and pc.get("has_more_page"):
-        return True
-    # some endpoints nest it differently
-    for v in result.values():
-        if isinstance(v, dict) and v.get("has_more_page"):
-            return True
-    return False
-
-
-def _parse_mcp_result(raw: Any) -> Any:
-    """Normalise a raw MCP tool result the same way execute_step does."""
-    return raw.model_dump() if hasattr(raw, "model_dump") else raw
-
-
-async def _autopaginate(
-    session: ClientSession,
-    tool_name: str,
-    base_args: dict,
-    first_result: Any,
-    audit: "AuditLog",
-    correlation_id: str,
-) -> Any:
-    """
-    Given the first page result, fetch all remaining pages and merge
-    the record lists. Returns a single combined result dict.
-    """
-    record_key, all_records = _extract_records(first_result)
-    if not record_key or not all_records:
-        return first_result
-
-    page = 2
-    while page <= MAX_AUTOPAGINATE_PAGES:
-        if not _has_more_pages(first_result if page == 2 else page_result):  # type: ignore[possibly-undefined]
-            break
-
-        page_args = {**base_args, "page": page}
-        log.info("autopaginate_fetch", extra={
-            "tool": tool_name, "page": page, "cid": correlation_id
-        })
-        try:
-            raw = await asyncio.wait_for(
-                session.call_tool(tool_name, page_args),
-                timeout=TOOL_TIMEOUT,
-            )
-            page_result = _parse_mcp_result(raw)
-        except Exception as exc:
-            log.warning("autopaginate_error", extra={
-                "tool": tool_name, "page": page,
-                "error": str(exc), "cid": correlation_id
-            })
-            break
-
-        _, page_records = _extract_records(page_result)
-        if not page_records:
-            break
-        all_records.extend(page_records)
-        audit.write("tool_paginated", tool=tool_name, page=page,
-                    records=len(page_records), cid=correlation_id)
-        page += 1
-
-    # Return merged result: replace the record list with all_records
-    merged = dict(first_result)
-    merged[record_key] = all_records
-    # Update page_context to reflect the full set
-    if "page_context" in merged and isinstance(merged["page_context"], dict):
-        merged["page_context"] = {
-            **merged["page_context"],
-            "has_more_page": False,
-            "total": len(all_records),
+        scrollBottom();
+      }
+      else if (evt.type==='table_append') {
+        // New page arrived — columns already match page 1, just append rows
+        const tbl = document.querySelector('#liveTable');
+        if (tbl) {
+          const tbody = tbl.querySelector('tbody');
+          (evt.rows || []).forEach(row => {
+            const tr = document.createElement('tr');
+            tr.className = 'row-new';
+            row.forEach(cell => {
+              const td = document.createElement('td');
+              td.innerHTML = styleCell(String(cell));
+              tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+            setTimeout(() => tr.classList.remove('row-new'), 500);
+          });
+          const footer = document.getElementById('liveTableFooter');
+          if (footer) {
+            const pill  = footer.querySelector('.table-loading-pill');
+            const count = footer.querySelector('.table-row-count');
+            if (count) count.textContent = `${evt.total_so_far} records loaded`;
+            if (pill && !evt.has_more) pill.style.display = 'none';
+          }
         }
-    log.info("autopaginate_complete", extra={
-        "tool": tool_name, "total_records": len(all_records),
-        "pages": page - 1, "cid": correlation_id
-    })
-    return merged
-
-
-# ---------------------------------------------------------------------------
-# Step executor
-# ---------------------------------------------------------------------------
-async def execute_step(
-    session: ClientSession,
-    toolbox: dict[str, ToolMeta],
-    state: AgentState,
-    memory: list[dict],
-    audit: AuditLog,
-    step: dict,
-    correlation_id: str,
-    gemini_client: Optional[Any] = None,
-) -> tuple[bool, Optional[Any]]:
-    tool_name: str = step.get("tool", "")
-    args: dict     = dict(step.get("args") or {})
-
-    if not tool_name or tool_name not in toolbox:
-        msg = f"Unknown tool: '{tool_name}'"
-        add_memory(memory, {"error": msg, "step": step, "cid": correlation_id},
-                   gemini_client, correlation_id)
-        log.warning("unknown_tool", extra={"tool": tool_name, "cid": correlation_id})
-        return False, None
-
-    meta = toolbox[tool_name]
-
-    cb = _circuit_breakers[tool_name]
-    if cb.is_open():
-        msg = f"Tool '{tool_name}' is temporarily disabled (circuit open)."
-        _print(f"[bold red]Assistant:[/bold red] {msg}\n")
-        add_memory(memory, {"error": msg, "tool": tool_name, "cid": correlation_id},
-                   gemini_client, correlation_id)
-        return False, None
-
-    if "organization_id" in meta.required and "organization_id" not in args:
-        if state.organization_id:
-            args["organization_id"] = state.organization_id
-
-    unknown, missing = validate_args(meta, args)
-    if unknown or missing:
-        add_memory(memory, {
-            "tool": tool_name, "args": args, "cid": correlation_id,
-            "schema_error": {
-                "unknown_keys": unknown, "missing_required": missing,
-                "allowed": meta.allowed[:40], "required": meta.required,
-            },
-        }, gemini_client, correlation_id)
-        log.warning("schema_error",
-                    extra={"tool": tool_name, "unknown": unknown, "missing": missing})
-        return False, None
-
-    if org := args.get("organization_id"):
-        state.organization_id = str(org)
-
-    log.info("tool_call", extra={"tool": tool_name, "cid": correlation_id})
-    t0 = time.monotonic()
-    try:
-        result = await retry_async(
-            asyncio.wait_for,
-            session.call_tool(tool_name, args),
-            timeout=TOOL_TIMEOUT,
-            retries=2,
-            base_delay=1.0,
-            label=tool_name,
-        )
-    except asyncio.TimeoutError:
-        msg = f"Tool '{tool_name}' timed out after {TOOL_TIMEOUT}s."
-        add_memory(memory, {"tool": tool_name, "error": msg, "cid": correlation_id},
-                   gemini_client, correlation_id)
-        cb.record_failure()
-        log.error("tool_timeout", extra={"tool": tool_name, "cid": correlation_id})
-        _print(f"[bold yellow]Assistant:[/bold yellow] {msg}\n")
-        return False, None
-    except Exception as exc:
-        msg = str(exc)
-        add_memory(memory, {"tool": tool_name, "args": args, "error": msg, "cid": correlation_id},
-                   gemini_client, correlation_id)
-        cb.record_failure()
-        log.error("tool_error", extra={"tool": tool_name, "error": msg,
-                                       "error_type": type(exc).__name__, "cid": correlation_id})
-        _print(f"[bold red]Assistant:[/bold red] Tool call failed — {msg}\n")
-        return False, None
-
-    elapsed     = round(time.monotonic() - t0, 2)
-    cb.record_success()
-    result_data = _parse_mcp_result(result)
-
-    # If this is a pageable list tool with more pages, flag it so the API
-    # stream handler can render page 1 immediately and fetch the rest in the
-    # background while the user reads — progressive loading.
-    if _is_pageable(tool_name) and _has_more_pages(result_data):
-        result_data["__paginate__"] = {
-            "tool":   tool_name,
-            "args":   args,
-            "page1":  True,
+        scrollBottom();
+      }
+      else if (evt.type==='table_complete') {
+        const footer = document.getElementById('liveTableFooter');
+        if (footer) {
+          footer.querySelector('.table-loading-pill')?.remove();
+          const count = footer.querySelector('.table-row-count');
+          if (count) count.textContent = `Showing all ${evt.total} records`;
         }
+      }
+      else if (evt.type==='confirm') {
+        if(evt.session_id){sessionId=evt.session_id;sessionDisp.textContent=sid6(sessionId);}
+        replaceBotMsg({type:'confirm',confirm_text:evt.confirm_text},[],Date.now()-t0);
+      }
+      else if (evt.type==='error') {
+        replaceBotMsg({type:'error',reply:evt.message||'Unknown error'},[],Date.now()-t0);
+        showToast(evt.message||'Error');
+      }
+    }
+  }
+}
 
-    add_memory(memory, {
-        "tool":      tool_name,
-        "args":      {k: args[k] for k in list(args)[:12]},
-        "result":    result_data,
-        "elapsed_s": elapsed,
-        "cid":       correlation_id,
-    }, gemini_client, correlation_id)
-    audit.write("tool_called", tool=tool_name, args=args, elapsed_s=elapsed, cid=correlation_id)
-    log.info("tool_success",
-             extra={"tool": tool_name, "elapsed_s": elapsed, "cid": correlation_id})
-    return True, result_data
-
-
-async def execute_plan(
-    session: ClientSession,
-    toolbox: dict[str, ToolMeta],
-    state: AgentState,
-    memory: list[dict],
-    audit: AuditLog,
-    gemini: genai.Client,
-    steps: list[dict],
-    correlation_id: str,
-) -> tuple[bool, Optional[Any]]:
-    last_result: Optional[Any] = None
-
-    i = 0
-    while i < len(steps):
-        step = steps[i]
-        if step.get("parallel"):
-            batch = [step]
-            j = i + 1
-            while j < len(steps) and steps[j].get("parallel"):
-                batch.append(steps[j])
-                j += 1
-            tasks = [
-                execute_step(session, toolbox, state, memory, audit, s, correlation_id, gemini)
-                for s in batch
-            ]
-            for (ok, rdata), s in zip(await asyncio.gather(*tasks), batch):
-                if not ok:
-                    return False, None
-                last_result = rdata
-            i = j
-            continue
-
-        ok, rdata = await execute_step(
-            session, toolbox, state, memory, audit, step, correlation_id, gemini
-        )
-        if not ok:
-            return False, None
-        last_result = rdata
-        i += 1
-
-    return True, last_result
-
-
-# ---------------------------------------------------------------------------
-# Misc helpers
-# ---------------------------------------------------------------------------
-def is_number_string(s: str) -> bool:
-    return bool(re.fullmatch(r"\d{6,}", (s or "").strip()))
-
-
-def validate_env() -> None:
-    missing = [k for k in REQUIRED_ENV_VARS if not os.getenv(k)]
-    if missing:
-        raise RuntimeError("Missing required environment variables: " + ", ".join(missing))
-
-
-# ---------------------------------------------------------------------------
-# Main REPL
-# ---------------------------------------------------------------------------
-async def main() -> None:
-    validate_env()
-    gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-
-    zoho_url = ""
-    while not zoho_url:
-        zoho_url = (await asyncio.get_event_loop().run_in_executor(
-            None, input, "Enter MCP URL: "
-        )).strip()
-        if not zoho_url:
-            _print("[yellow]MCP URL cannot be empty.[/yellow]")
-
-    zoho_bearer: Optional[str] = os.getenv("ZOHO_MCP_BEARER")
-    headers: dict[str, str] = {}
-    if zoho_bearer:
-        headers["Authorization"] = f"Bearer {zoho_bearer}"
-
-    default_org_id: Optional[str] = os.getenv("ZOHO_ORG_ID") or None
-    state = AgentState(organization_id=default_org_id)
-
-    if not state.organization_id:
-        while True:
-            oid = (await asyncio.get_event_loop().run_in_executor(
-                None, input, "Enter Zoho Organisation ID: "
-            )).strip()
-            if re.fullmatch(r"\d{4,}", oid):
-                state.organization_id = oid
-                break
-            _print("[yellow]Organisation ID must be numeric (e.g. 60065733225).[/yellow]")
-
-    memory: list[dict] = []
-    audit  = AuditLog(AUDIT_LOG_PATH)
-    pending_confirm: Optional[dict] = None
-    replan_attempts: int = 0
-    shutdown_event = asyncio.Event()
-
-    def _handle_signal(sig: int, _frame: Any) -> None:
-        _print("\n[bold yellow]Shutting down gracefully…[/bold yellow]")
-        shutdown_event.set()
-
-    signal.signal(signal.SIGINT,  _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-
-    log.info("agent_starting", extra={"model": MODEL, "org_id": state.organization_id})
-
-    async with httpx.AsyncClient(headers=headers,
-                                  timeout=httpx.Timeout(TOOL_TIMEOUT + 10)) as http_client:
-        async with streamable_http_client(zoho_url, http_client=http_client) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                toolbox = build_tool_catalog(await session.list_tools())
-
-                _print("\n[bold green]✓ Zoho Books Assistant ready[/bold green]")
-                _print(f"  [dim]Tools: {len(toolbox)} | Model: {MODEL} | Org: {state.organization_id}[/dim]")
-                _print("  [dim]Commands: quit, tools, memory, state[/dim]\n")
-
-                while not shutdown_event.is_set():
-                    try:
-                        user_msg = await asyncio.get_event_loop().run_in_executor(
-                            None, input, "You: "
-                        )
-                    except EOFError:
-                        break
-                    user_msg = user_msg.strip()
-                    if not user_msg:
-                        continue
-
-                    if user_msg.lower() in {"quit", "exit", "q"}:
-                        break
-
-                    if user_msg.lower() == "tools":
-                        for name, meta in sorted(toolbox.items()):
-                            tag = "[dim](read)[/dim]" if meta.read_only else "[yellow](write)[/yellow]"
-                            _print(f"  {tag} {name} — {meta.desc}")
-                        _print("")
-                        continue
-
-                    if user_msg.lower() == "memory":
-                        _print(f"\n[bold]Memory ({len(memory)} entries):[/bold]")
-                        _print(json.dumps(memory, indent=2, default=str))
-                        _print("")
-                        continue
-
-                    if user_msg.lower() == "state":
-                        _print(json.dumps(state.to_dict(), indent=2))
-                        continue
-
-                    if is_number_string(user_msg) and not state.organization_id:
-                        state.organization_id = user_msg
-                        _print(f"[green]Assistant:[/green] Org ID saved: {user_msg}\n")
-                        audit.write("org_id_set", org_id=user_msg)
-                        continue
-
-                    cid = uuid.uuid4().hex[:10]
-                    audit.write("user_message", msg=user_msg, cid=cid)
-
-                    plan: dict
-                    if pending_confirm:
-                        answer = user_msg.lower()
-                        if answer in {"yes", "y"}:
-                            plan = pending_confirm["on_yes"]
-                            pending_confirm = None
-                            audit.write("confirm_accepted", cid=cid)
-                        elif answer in {"no", "n"}:
-                            no_obj = pending_confirm.get("on_no") or {}
-                            pending_confirm = None
-                            audit.write("confirm_rejected", cid=cid)
-                            _print(f"[green]Assistant:[/green] {no_obj.get('text', 'Cancelled.')}\n")
-                            continue
-                        else:
-                            _print("[green]Assistant:[/green] Please reply YES or NO.\n")
-                            continue
-                    else:
-                        raw  = await gemini_plan(gemini_client, toolbox, state, memory, user_msg, cid)
-                        plan = normalize_plan(raw)
-                        replan_attempts = 0
-
-                    ptype = plan.get("type")
-
-                    if ptype == "ask":
-                        state.update_from_dict(plan.get("save") or {})
-                        _print(f"[green]Assistant:[/green] {plan.get('text', 'I need more details.')}\n")
-                        audit.write("ask", text=plan.get("text"), cid=cid)
-                        continue
-
-                    if ptype == "confirm":
-                        pending_confirm = {"on_yes": plan.get("on_yes"), "on_no": plan.get("on_no")}
-                        _print(f"[bold yellow]Assistant:[/bold yellow] {plan.get('text', 'Confirm?')} (YES / NO)\n")
-                        audit.write("confirm_requested", text=plan.get("text"), cid=cid)
-                        continue
-
-                    if ptype != "plan":
-                        _print("[green]Assistant:[/green] Couldn't determine an action. Please rephrase.\n")
-                        continue
-
-                    steps: list[dict] = plan.get("steps") or []
-                    if not steps:
-                        _print("[green]Assistant:[/green] Plan had no steps. Please rephrase.\n")
-                        continue
-
-                    risky_steps = [s for s in steps if is_risky(s.get("tool", ""))]
-                    if risky_steps and not pending_confirm:
-                        risky_names = ", ".join(s["tool"] for s in risky_steps)
-                        pending_confirm = {
-                            "on_yes": plan,
-                            "on_no":  {"type": "ask", "text": "Cancelled. What would you like instead?"},
-                        }
-                        _print(f"[bold yellow]Assistant:[/bold yellow] Sensitive: {risky_names}. YES to confirm / NO to cancel.\n")
-                        audit.write("risky_confirm_requested", tools=risky_names, cid=cid)
-                        continue
-
-                    _print("[dim]Assistant: Working…[/dim]")
-                    ok, last_result = await execute_plan(
-                        session, toolbox, state, memory, audit, gemini_client, steps, cid
-                    )
-
-                    if ok and last_result is not None:
-                        last_step = steps[-1]
-                        await gemini_summarize(gemini_client, last_step.get("tool", ""),
-                                               last_step.get("args", {}), last_result, state, cid,
-                                               user_question=last_step.get("note", user_msg))
-                        state.clear_workflow()
-                        replan_attempts = 0
-                        continue
-
-                    if replan_attempts >= MAX_REPLAN_ATTEMPTS:
-                        _print("[bold red]Assistant:[/bold red] Tried multiple times but couldn't complete this. Please rephrase.\n")
-                        replan_attempts = 0
-                        continue
-
-                    replan_attempts += 1
-                    replan_raw = await gemini_plan(
-                        gemini_client, toolbox, state, memory,
-                        "Fix the plan using MEMORY errors. Ask only for genuinely missing required fields.",
-                        cid,
-                    )
-                    replan = normalize_plan(replan_raw)
-                    rtype  = replan.get("type")
-
-                    if rtype == "ask":
-                        state.update_from_dict(replan.get("save") or {})
-                        _print(f"[green]Assistant:[/green] {replan.get('text', 'I need more details.')}\n")
-                    elif rtype == "confirm":
-                        pending_confirm = {"on_yes": replan.get("on_yes"), "on_no": replan.get("on_no")}
-                        _print(f"[bold yellow]Assistant:[/bold yellow] {replan.get('text', 'Confirm?')} (YES / NO)\n")
-                    elif rtype == "plan":
-                        tools_preview = " → ".join(s.get("tool", "?") for s in (replan.get("steps") or []))
-                        has_risky = any(is_risky(s.get("tool", "")) for s in (replan.get("steps") or []))
-                        pending_confirm = {
-                            "on_yes": replan,
-                            "on_no":  {"type": "ask", "text": "Okay — tell me what to change."},
-                        }
-                        label = "[bold yellow]" if has_risky else "[green]"
-                        _print(f"{label}Assistant:[/bold yellow if has_risky else /green] Replanned: {tools_preview}. YES to proceed / NO to change.\n")
-                    else:
-                        _print("[bold red]Assistant:[/bold red] I'm stuck. Please rephrase.\n")
-
-    audit.close()
-    _print("[dim]Session ended.[/dim]")
-    log.info("agent_stopped")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+// ── Init ─────────────────────────────────────────────────────────
+document.getElementById('mcpUrlInput').focus();
+</script>
+</body>
+</html>
