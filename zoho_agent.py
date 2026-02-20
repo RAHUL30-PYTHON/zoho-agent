@@ -53,19 +53,19 @@ except ImportError:
 # ---------------------------------------------------------------------------
 load_dotenv("api.env")
 
-MODEL: str                   = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+MODEL: str                   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-04-17")
 # Optionally use a faster model just for planning (e.g. gemini-1.5-flash-8b or gemini-2.0-flash)
 # Summarizer always uses MODEL since it needs to handle large outputs
 PLANNER_MODEL: str           = os.getenv("GEMINI_PLANNER_MODEL", MODEL)
-MAX_MEMORY_TOKENS: int       = int(os.getenv("MAX_MEMORY_TOKENS", "30000"))
-MAX_MEMORY_ENTRIES: int      = int(os.getenv("MAX_MEMORY_ENTRIES", "90"))
-MEMORY_SUMMARIZE_THRESHOLD   = int(os.getenv("MEMORY_SUMMARIZE_THRESHOLD", "60"))
+MAX_MEMORY_TOKENS: int       = int(os.getenv("MAX_MEMORY_TOKENS", "24000"))
+MAX_MEMORY_ENTRIES: int      = int(os.getenv("MAX_MEMORY_ENTRIES", "60"))
+MEMORY_SUMMARIZE_THRESHOLD   = int(os.getenv("MEMORY_SUMMARIZE_THRESHOLD", "45"))
 MAX_TOOL_PROPS: int          = int(os.getenv("MAX_TOOL_PROPS", "60"))
 MAX_REPLAN_ATTEMPTS: int     = int(os.getenv("MAX_REPLAN_ATTEMPTS", "3"))
 AUDIT_LOG_PATH: str          = os.getenv("AUDIT_LOG_PATH", "audit.jsonl")
 LOG_LEVEL: str               = os.getenv("LOG_LEVEL", "WARNING")
-TOOL_TIMEOUT: float          = float(os.getenv("TOOL_TIMEOUT_SECONDS", "60"))
-GEMINI_TIMEOUT: float        = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "120"))
+TOOL_TIMEOUT: float          = float(os.getenv("TOOL_TIMEOUT_SECONDS", "30"))
+GEMINI_TIMEOUT: float        = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "60"))
 CIRCUIT_BREAK_THRESHOLD: int = int(os.getenv("CIRCUIT_BREAK_THRESHOLD", "3"))
 CIRCUIT_BREAK_RESET_S: int   = int(os.getenv("CIRCUIT_BREAK_RESET_SECONDS", "120"))
 # Max chars of raw result sent to summarizer — prevents Gemini 400 on huge payloads
@@ -448,10 +448,23 @@ RULES:
 9. Continue the active workflow until complete; never ask "What would you like to do?" mid-workflow.
 10. Mark pending_intent in save{} when starting a multi-step workflow so context survives turns.
 
+PAGINATION & FILTERING — MANDATORY RULES (follow these on every list call):
+- ALWAYS pass per_page=100 on every list/search tool call. This is the page size — the system
+  will automatically fetch all remaining pages for you, so you never need to set page=2 yourself.
+- ALWAYS apply the narrowest possible status filter based on the user's intent:
+    "pending payments to receive" / "outstanding" / "unpaid invoices" → status=unpaid
+    "overdue" → status=overdue
+    "paid invoices" → status=paid
+    "pending bills to pay" / "unpaid bills" → status=unpaid
+    "draft invoices" → status=draft
+    "all invoices" / "every invoice" / no status mentioned → omit the filter (fetches all)
+  If no status is obvious from context, omit the status filter entirely.
+- Never call a list tool without per_page=100.
+
 ANSWERING QUESTIONS vs LISTING DATA — critical distinction:
 - USER ASKS FOR A TOTAL / COUNT / SUM / AVERAGE / SUMMARY (e.g. "total amount to receive",
   "how many overdue invoices", "what is my total payable"):
-    → Fetch the raw data with the appropriate tool.
+    → Fetch filtered data (status=unpaid / status=overdue etc.) with per_page=100.
     → Set the step "note" to the user's exact question so the summarizer knows to COMPUTE the answer.
     → The summarizer will sum/count/aggregate from the raw records — do NOT just show a table.
 - USER ASKS TO LIST / SHOW / GET records → table is appropriate.
@@ -914,6 +927,118 @@ def normalize_plan(plan: Any) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Auto-pagination helper
+# ---------------------------------------------------------------------------
+MAX_AUTOPAGINATE_PAGES: int = int(os.getenv("MAX_AUTOPAGINATE_PAGES", "20"))
+# List-tool name substrings that support pagination
+_PAGEABLE_TOOL_SUBSTRINGS = (
+    "list_invoices", "list_bills", "list_contacts", "list_items",
+    "list_expenses", "list_payments", "list_creditnotes", "list_estimates",
+    "list_salesorders", "list_purchaseorders", "list_transactions",
+    "list_bank", "list_journals", "search_invoices", "search_contacts",
+)
+
+
+def _is_pageable(tool_name: str) -> bool:
+    tl = tool_name.lower()
+    return any(sub in tl for sub in _PAGEABLE_TOOL_SUBSTRINGS)
+
+
+def _extract_records(result: Any) -> tuple[str, list]:
+    """Return (key, records_list) for the largest list in a Zoho result dict."""
+    if not isinstance(result, dict):
+        return "", []
+    best_key, best_arr = "", []
+    for k, v in result.items():
+        if isinstance(v, list) and len(v) > len(best_arr) and k != "page_context":
+            best_key, best_arr = k, v
+    return best_key, best_arr
+
+
+def _has_more_pages(result: Any) -> bool:
+    """Return True if the Zoho response indicates more pages exist."""
+    if not isinstance(result, dict):
+        return False
+    # page_context at top level
+    pc = result.get("page_context") or {}
+    if isinstance(pc, dict) and pc.get("has_more_page"):
+        return True
+    # some endpoints nest it differently
+    for v in result.values():
+        if isinstance(v, dict) and v.get("has_more_page"):
+            return True
+    return False
+
+
+def _parse_mcp_result(raw: Any) -> Any:
+    """Normalise a raw MCP tool result the same way execute_step does."""
+    return raw.model_dump() if hasattr(raw, "model_dump") else raw
+
+
+async def _autopaginate(
+    session: ClientSession,
+    tool_name: str,
+    base_args: dict,
+    first_result: Any,
+    audit: "AuditLog",
+    correlation_id: str,
+) -> Any:
+    """
+    Given the first page result, fetch all remaining pages and merge
+    the record lists. Returns a single combined result dict.
+    """
+    record_key, all_records = _extract_records(first_result)
+    if not record_key or not all_records:
+        return first_result
+
+    page = 2
+    while page <= MAX_AUTOPAGINATE_PAGES:
+        if not _has_more_pages(first_result if page == 2 else page_result):  # type: ignore[possibly-undefined]
+            break
+
+        page_args = {**base_args, "page": page}
+        log.info("autopaginate_fetch", extra={
+            "tool": tool_name, "page": page, "cid": correlation_id
+        })
+        try:
+            raw = await asyncio.wait_for(
+                session.call_tool(tool_name, page_args),
+                timeout=TOOL_TIMEOUT,
+            )
+            page_result = _parse_mcp_result(raw)
+        except Exception as exc:
+            log.warning("autopaginate_error", extra={
+                "tool": tool_name, "page": page,
+                "error": str(exc), "cid": correlation_id
+            })
+            break
+
+        _, page_records = _extract_records(page_result)
+        if not page_records:
+            break
+        all_records.extend(page_records)
+        audit.write("tool_paginated", tool=tool_name, page=page,
+                    records=len(page_records), cid=correlation_id)
+        page += 1
+
+    # Return merged result: replace the record list with all_records
+    merged = dict(first_result)
+    merged[record_key] = all_records
+    # Update page_context to reflect the full set
+    if "page_context" in merged and isinstance(merged["page_context"], dict):
+        merged["page_context"] = {
+            **merged["page_context"],
+            "has_more_page": False,
+            "total": len(all_records),
+        }
+    log.info("autopaginate_complete", extra={
+        "tool": tool_name, "total_records": len(all_records),
+        "pages": page - 1, "cid": correlation_id
+    })
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # Step executor
 # ---------------------------------------------------------------------------
 async def execute_step(
@@ -997,7 +1122,17 @@ async def execute_step(
 
     elapsed     = round(time.monotonic() - t0, 2)
     cb.record_success()
-    result_data = result.model_dump() if hasattr(result, "model_dump") else result
+    result_data = _parse_mcp_result(result)
+
+    # If this is a pageable list tool with more pages, flag it so the API
+    # stream handler can render page 1 immediately and fetch the rest in the
+    # background while the user reads — progressive loading.
+    if _is_pageable(tool_name) and _has_more_pages(result_data):
+        result_data["__paginate__"] = {
+            "tool":   tool_name,
+            "args":   args,
+            "page1":  True,
+        }
 
     add_memory(memory, {
         "tool":      tool_name,
@@ -1275,7 +1410,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
