@@ -21,10 +21,32 @@ from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types as gtypes
 from mcp import ClientSession
+from mcp.client.sse import sse_client
 try:
     from mcp.client.streamable_http import streamable_http_client
 except ImportError:
-    from mcp.client.streamable_http import streamablehttp_client as streamable_http_client
+    try:
+        from mcp.client.streamable_http import streamablehttp_client as streamable_http_client
+    except ImportError:
+        streamable_http_client = None  # type: ignore
+
+
+def _is_sse_url(url: str) -> bool:
+    """
+    Zoho MCP uses SSE transport. Detect it by URL patterns:
+      - contains /sse, /events, /message, or ends with a query key param
+      - streamable HTTP URLs typically end with /mcp or /rpc
+    If unsure, default to SSE — it's the older and more widely deployed transport.
+    """
+    u = url.lower()
+    # Explicit SSE indicators
+    if any(seg in u for seg in ("/sse", "/events", "/message?", "?key=", "&key=")):
+        return True
+    # Streamable HTTP indicators
+    if any(u.rstrip("/").endswith(seg) for seg in ("/mcp", "/rpc", "/jsonrpc")):
+        return False
+    # Default: SSE (Zoho and most hosted MCP servers still use it)
+    return True
 
 from zoho_agent import (
     AgentState,
@@ -140,34 +162,70 @@ async def create_agent_session(
     zoho_bearer = os.getenv("ZOHO_MCP_BEARER")
     headers     = {"Authorization": f"Bearer {zoho_bearer}"} if zoho_bearer else {}
 
-    http_client = httpx.AsyncClient(
-        headers=headers,
-        timeout=httpx.Timeout(TOOL_TIMEOUT + 10),
-    )
-    await http_client.__aenter__()
+    use_sse = _is_sse_url(mcp_url)
+    log.info("mcp_transport_selected", extra={
+        "sid": session_id, "transport": "sse" if use_sse else "streamable_http", "url": mcp_url
+    })
 
-    stream_cm = streamable_http_client(mcp_url, http_client=http_client)
-    read, write, _ = await stream_cm.__aenter__()
+    if use_sse:
+        # SSE transport — used by Zoho MCP and most hosted servers
+        http_client = httpx.AsyncClient(
+            headers=headers,
+            timeout=httpx.Timeout(TOOL_TIMEOUT + 10),
+        )
+        await http_client.__aenter__()
 
-    mcp_cm = ClientSession(read, write)
-    mcp_session: ClientSession = await mcp_cm.__aenter__()
-    await mcp_session.initialize()
+        stream_cm = sse_client(mcp_url, headers=headers)
+        read, write = await stream_cm.__aenter__()
+        mcp_cm = ClientSession(read, write)
+        mcp_session: ClientSession = await mcp_cm.__aenter__()
+        await mcp_session.initialize()
 
-    toolbox = build_tool_catalog(await mcp_session.list_tools())
-    log.info("session_mcp_connected", extra={"sid": session_id, "tools": len(toolbox), "url": mcp_url})
+        toolbox = build_tool_catalog(await mcp_session.list_tools())
+        log.info("session_mcp_connected", extra={"sid": session_id, "tools": len(toolbox), "url": mcp_url, "transport": "sse"})
 
-    return AgentSession(
-        session_id   = session_id,
-        # org_id from request takes priority; no hardcoded default
-        state        = AgentState(organization_id=org_id or None),
-        mcp_url      = mcp_url,
-        mcp_session  = mcp_session,
-        toolbox      = toolbox,
-        _http_client = http_client,
-        _cm_http     = http_client,
-        _cm_stream   = stream_cm,
-        _cm_mcp      = mcp_cm,
-    )
+        return AgentSession(
+            session_id   = session_id,
+            state        = AgentState(organization_id=org_id or None),
+            mcp_url      = mcp_url,
+            mcp_session  = mcp_session,
+            toolbox      = toolbox,
+            _http_client = http_client,
+            _cm_http     = http_client,
+            _cm_stream   = stream_cm,
+            _cm_mcp      = mcp_cm,
+        )
+    else:
+        # Streamable HTTP transport — newer MCP spec
+        if streamable_http_client is None:
+            raise RuntimeError("streamable_http transport not available in this mcp version")
+
+        http_client = httpx.AsyncClient(
+            headers=headers,
+            timeout=httpx.Timeout(TOOL_TIMEOUT + 10),
+        )
+        await http_client.__aenter__()
+
+        stream_cm = streamable_http_client(mcp_url, http_client=http_client)
+        read, write, _ = await stream_cm.__aenter__()
+        mcp_cm = ClientSession(read, write)
+        mcp_session = await mcp_cm.__aenter__()
+        await mcp_session.initialize()
+
+        toolbox = build_tool_catalog(await mcp_session.list_tools())
+        log.info("session_mcp_connected", extra={"sid": session_id, "tools": len(toolbox), "url": mcp_url, "transport": "streamable_http"})
+
+        return AgentSession(
+            session_id   = session_id,
+            state        = AgentState(organization_id=org_id or None),
+            mcp_url      = mcp_url,
+            mcp_session  = mcp_session,
+            toolbox      = toolbox,
+            _http_client = http_client,
+            _cm_http     = http_client,
+            _cm_stream   = stream_cm,
+            _cm_mcp      = mcp_cm,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +262,29 @@ class SessionStore:
                 raise HTTPException(503, "Too many active sessions — try again later.")
 
             sid = session_id or uuid.uuid4().hex
-            sess = await create_agent_session(sid, mcp_url, gemini, org_id=org_id)
+            try:
+                sess = await create_agent_session(sid, mcp_url, gemini, org_id=org_id)
+            except Exception as exc:
+                import traceback as _tb
+                tb = _tb.format_exc()
+                log.error("session_create_failed", extra={
+                    "sid": sid, "url": mcp_url,
+                    "error": str(exc), "error_type": type(exc).__name__,
+                    "traceback": tb,
+                })
+                # Produce a human-readable message for the API caller
+                msg = str(exc)
+                if "connection" in msg.lower() or "connect" in msg.lower():
+                    detail = f"Could not connect to MCP server at {mcp_url} — is the server running and reachable?"
+                elif "401" in msg or "403" in msg or "unauthorized" in msg.lower() or "forbidden" in msg.lower():
+                    detail = f"MCP server rejected the connection (auth error). Check your bearer token or API key."
+                elif "404" in msg:
+                    detail = f"MCP server URL not found (404). Double-check the URL: {mcp_url}"
+                elif "timeout" in msg.lower():
+                    detail = f"MCP server connection timed out. The server may be overloaded or the URL is wrong."
+                else:
+                    detail = f"MCP connection failed ({type(exc).__name__}): {msg}"
+                raise HTTPException(502, detail=detail)
             self._sessions[sid] = sess
             log.info("session_created", extra={"sid": sid, "org_id": org_id})
             return sess
@@ -669,11 +749,26 @@ async def confirm(req: ConfirmRequest) -> ChatResponse:
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
-    a    = _app()
-    sess = await a.sessions.get_or_create(
-        req.session_id, req.mcp_url, a.gemini, org_id=req.org_id
-    )
-    cid  = uuid.uuid4().hex[:10]
+    a   = _app()
+    cid = uuid.uuid4().hex[:10]
+
+    # Connect to MCP before starting the stream so we can surface errors cleanly
+    try:
+        sess = await a.sessions.get_or_create(
+            req.session_id, req.mcp_url, a.gemini, org_id=req.org_id
+        )
+    except HTTPException as exc:
+        # Return an SSE stream that immediately emits the error — frontend handles it
+        _err_detail = exc.detail
+        async def _err_stream() -> AsyncIterator[str]:
+            yield "data: " + json.dumps({"type": "error", "message": _err_detail}) + "\n\n"
+        return StreamingResponse(_err_stream(), media_type="text/event-stream")
+    except Exception as exc:
+        _err_msg = f"Unexpected error: {exc}"
+        async def _err_stream2() -> AsyncIterator[str]:
+            yield "data: " + json.dumps({"type": "error", "message": _err_msg}) + "\n\n"
+        return StreamingResponse(_err_stream2(), media_type="text/event-stream")
+
     a.audit.write("user_message_stream", msg=req.message, cid=cid, sid=sess.session_id)
 
     async def _stream() -> AsyncIterator[str]:
