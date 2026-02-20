@@ -784,8 +784,18 @@ async function streamChat(message) {
         replaceBotMsg({type:'confirm',confirm_text:evt.confirm_text},[],Date.now()-t0);
       }
       else if (evt.type==='error') {
-        replaceBotMsg({type:'error',reply:evt.message||'Unknown error'},[],Date.now()-t0);
-        showToast(evt.message||'Error');
+        const msg = evt.message || 'Unknown error';
+        // MCP connection errors — show reconnect option
+        const isMcpError = msg.toLowerCase().includes('mcp') ||
+                           msg.toLowerCase().includes('connect') ||
+                           msg.toLowerCase().includes('502') ||
+                           msg.toLowerCase().includes('server');
+        if (isMcpError) {
+          replaceBotMsg({type:'error',reply:'⚠️  ' + msg + '\n\nCheck that your MCP server is running and the URL is correct, then reload the page to reconnect.'},[],Date.now()-t0);
+        } else {
+          replaceBotMsg({type:'error',reply:msg},[],Date.now()-t0);
+        }
+        showToast(msg, 6000);
       }
     }
   }
