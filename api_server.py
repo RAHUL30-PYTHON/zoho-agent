@@ -58,6 +58,7 @@ from zoho_agent import (
     _estimate_tokens,
     _extract_records,
     _has_more_pages,
+    _parse_mcp_result,
     _safe_result_str,
     _stream_collect_json,
     add_memory,
@@ -897,6 +898,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 structured = _build_table_structured(
                     last_result, last_tool, more_pages=bool(paginate_meta)
                 )
+                # Preserve col_keys for background pagination BEFORE popping
+                _page1_col_keys: list[str] = structured.get("col_keys") or []
                 # col_keys is internal — strip before sending to client
                 structured.pop("col_keys", None)
                 log.info("table_built_python", extra={
@@ -907,7 +910,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
             else:
                 # ── Gemini path: aggregation, single record, action ───────
-                # FIX: For aggregations over multiple records, pre-compute the
+                _page1_col_keys: list[str] = []  # not a table, no col keys needed
                 # numbers in Python and send only the summary to Gemini.
                 # This avoids sending huge payloads AND prevents truncation
                 # which was causing partial JSON to stream as plain text.
@@ -991,7 +994,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             if paginate_meta:
                 pg_tool       = paginate_meta["tool"]
                 pg_args       = dict(paginate_meta["args"])
-                col_keys      = _detect_cols(sample_records, pg_tool)
+                # Use the col_keys captured from page 1 for column alignment.
+                # Fall back to detecting from sample_records if somehow not set.
+                col_keys      = _page1_col_keys or _detect_cols(sample_records, pg_tool)
                 page          = 2
                 total_fetched = len(sample_records)
 
@@ -1003,7 +1008,12 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             sess.mcp_session.call_tool(pg_tool, pg_args),
                             timeout=TOOL_TIMEOUT,
                         )
-                        page_result = raw_page.model_dump() if hasattr(raw_page, "model_dump") else raw_page
+                        # FIX: Must use _parse_mcp_result (not just model_dump) to
+                        # unwrap the MCP content envelope on every page fetch.
+                        # Without this, page 2+ results still have the
+                        # {"content":[{"type":"text","text":"<json>"}]} wrapper,
+                        # so _extract_records returns empty and the loop breaks.
+                        page_result = _parse_mcp_result(raw_page)
                     except Exception as exc:
                         log.warning("bg_paginate_error", extra={"page": page, "error": str(exc), "cid": cid})
                         break
