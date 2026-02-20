@@ -21,9 +21,6 @@ from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types as gtypes
 from mcp import ClientSession
-from pathlib import Path
-from fastapi.responses import FileResponse
-
 try:
     from mcp.client.streamable_http import streamable_http_client
 except ImportError:
@@ -282,123 +279,116 @@ async def api_summarize(
         return {"format": "status", "ok": True, "headline": cleaned or "Done.", "detail": ""}
 
 
-def _count_records(result: Any) -> int:
-    """Count total records in the primary list of a Zoho result."""
-    _, records = _extract_records(result) if isinstance(result, dict) else ("", [])
-    return len(records)
+# ── Per-entity preferred column lists (covers all Zoho Books entity types) ──
+_ENTITY_COLS: dict[str, list[str]] = {
+    "invoice":       ["invoice_number","customer_name","date","due_date","total","balance","status","due_days"],
+    "bill":          ["bill_number","vendor_name","date","due_date","total","balance","status","due_days"],
+    "contact":       ["contact_name","company_name","email","phone","contact_type","outstanding_receivable_amount","outstanding_payable_amount","status"],
+    "item":          ["name","sku","rate","purchase_rate","stock_on_hand","unit","item_type","status"],
+    "expense":       ["date","account_name","vendor_name","total","is_billable","status","reference_number"],
+    "payment":       ["date","customer_name","payment_number","amount","payment_mode","reference_number","description"],
+    "creditnote":    ["creditnote_number","customer_name","date","total","balance","status"],
+    "estimate":      ["estimate_number","customer_name","date","expiry_date","total","status"],
+    "salesorder":    ["salesorder_number","customer_name","date","shipment_date","total","status"],
+    "purchaseorder": ["purchaseorder_number","vendor_name","date","delivery_date","total","status"],
+    "transaction":   ["date","transaction_type","description","debit_amount","credit_amount","running_balance"],
+    "journal":       ["journal_date","journal_number","reference_number","notes","total","status"],
+    "account":       ["account_name","account_type","account_code","current_balance","description"],
+    "tax":           ["tax_name","tax_percentage","tax_type","is_default_tax","status"],
+}
+
+_SKIP_FIELDS: frozenset[str] = frozenset({
+    "organization_id","created_time","last_modified_time","created_by","last_modified_by",
+    "template_id","template_name","color_code","zcrm_potential_id","zcrm_potential_name",
+    "is_viewed_by_client","client_viewed_time","ach_payment_initiated","tax_rounding",
+    "is_emailed","is_inclusive_tax","salesorder_id","purchaseorder_id","estimate_id",
+    "page_context","__paginate__",
+})
+
+_AMOUNT_FIELDS: tuple[str, ...] = (
+    "balance","total","amount","balance_due","amount_applied",
+    "outstanding_receivable_amount","outstanding_payable_amount",
+    "debit_amount","credit_amount",
+)
 
 
-def _records_to_rows(records: list) -> dict:
-    """Convert a list of Zoho record dicts into {columns, rows} for SSE emission."""
-    PREFERRED = ["invoice_number", "bill_number", "contact_name", "customer_name",
-                 "vendor_name", "date", "due_date", "total", "balance", "status",
-                 "payment_expected_date", "due_days"]
-    SKIP = {"organization_id", "created_time", "last_modified_time",
-            "template_id", "color_code", "zcrm_potential_id"}
-
+def _detect_cols(records: list, tool_name: str) -> list[str]:
+    tl = tool_name.lower()
+    preferred: list[str] = []
+    for cat, cols in _ENTITY_COLS.items():
+        if cat in tl:
+            preferred = cols
+            break
     col_freq: dict[str, int] = {}
     for rec in records[:50]:
         if isinstance(rec, dict):
             for k in rec:
-                col_freq[k] = col_freq.get(k, 0) + 1
-
-    cols = [c for c in PREFERRED if col_freq.get(c, 0) > 0]
-    if not cols:
-        cols = [c for c, _ in sorted(col_freq.items(), key=lambda x: -x[1])
-                if c not in SKIP][:8]
-
-    rows = []
-    for rec in records:
-        if isinstance(rec, dict):
-            rows.append([str(rec.get(c, "")) for c in cols])
-
-    return {
-        "columns": [c.replace("_", " ").title() for c in cols],
-        "rows":    rows,
-    }
+                if k not in _SKIP_FIELDS:
+                    col_freq[k] = col_freq.get(k, 0) + 1
+    result_cols = [c for c in preferred if col_freq.get(c, 0) > 0]
+    if len(result_cols) < 4:
+        extras = [c for c, _ in sorted(col_freq.items(), key=lambda x: -x[1])
+                  if c not in result_cols]
+        result_cols = (result_cols + extras)[:8]
+    return result_cols[:8]
 
 
-def _fast_fallback_summary(result: Any, tool_name: str) -> str:
-    """
-    Pure-Python fallback summary when Gemini times out on a large result.
-    Extracts the biggest record list, computes totals/counts, returns
-    structured JSON matching the summarizer output format.
-    """
-    import json as _json
-
-    # Find the largest list inside the result
-    records: list = []
-    if isinstance(result, dict):
-        for k, v in result.items():
-            if isinstance(v, list) and len(v) > len(records):
-                records = v
-
-    if not records:
-        return _json.dumps({
-            "format": "status", "ok": True,
-            "headline": f"{tool_name} completed — {len(records)} records returned.",
-        })
-
-    count = len(records)
-
-    # Try to find amount/balance fields and sum them
-    AMOUNT_FIELDS = ("balance", "total", "amount", "balance_due",
-                     "outstanding_receivable_amount", "outstanding_payable_amount")
+def _compute_totals(records: list) -> dict[str, float]:
     totals: dict[str, float] = {}
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        for field in AMOUNT_FIELDS:
-            if field in rec:
+        for f in _AMOUNT_FIELDS:
+            if f in rec:
                 try:
-                    totals[field] = totals.get(field, 0.0) + float(rec[field])
+                    totals[f] = totals.get(f, 0.0) + float(rec[f])
                 except (TypeError, ValueError):
                     pass
+    return totals
 
-    # Build headline
-    primary_field = next((f for f in AMOUNT_FIELDS if f in totals), None)
-    if primary_field:
-        total_val = totals[primary_field]
-        headline  = f"{count} records · Total {primary_field.replace('_',' ')}: ₹{total_val:,.2f}"
-    else:
-        headline = f"{count} records returned by {tool_name}"
 
-    # Build a slim table from the first 100 records
-    # Identify columns present in most records
-    col_freq: dict[str, int] = {}
-    for rec in records[:100]:
-        if isinstance(rec, dict):
-            for k in rec:
-                col_freq[k] = col_freq.get(k, 0) + 1
+def _count_records(result: Any) -> int:
+    _, records = _extract_records(result) if isinstance(result, dict) else ("", [])
+    return len(records)
 
-    # Prefer useful display columns, skip internal IDs and noise
-    PREFERRED = ["invoice_number", "bill_number", "contact_name", "customer_name",
-                 "vendor_name", "date", "due_date", "total", "balance", "status",
-                 "payment_expected_date", "due_days"]
-    SKIP      = {"organization_id", "created_time", "last_modified_time",
-                 "template_id", "color_code", "zcrm_potential_id"}
 
-    cols = [c for c in PREFERRED if col_freq.get(c, 0) > 0]
-    if not cols:
-        cols = [c for c in sorted(col_freq, key=lambda k: -col_freq[k])
-                if c not in SKIP][:8]
+def _records_to_rows(records: list, tool_name: str = "") -> dict:
+    cols = _detect_cols(records, tool_name)
+    rows = [[str(rec.get(c, "")) for c in cols] for rec in records if isinstance(rec, dict)]
+    return {"col_keys": cols, "columns": [c.replace("_", " ").title() for c in cols], "rows": rows}
 
-    rows = []
-    for rec in records[:100]:
-        if isinstance(rec, dict):
-            rows.append([str(rec.get(c, "")) for c in cols])
 
-    footer = f"Showing {min(count,100)} of {count} records"
-    if primary_field:
-        footer += f" · Total {primary_field.replace('_',' ')}: ₹{totals[primary_field]:,.2f}"
+def _build_table_structured(result: Any, tool_name: str,
+                             more_pages: bool = False) -> dict:
+    _, records = _extract_records(result) if isinstance(result, dict) else ("", [])
+    if not records:
+        return {"format": "status", "ok": False, "headline": "No records found.",
+                "detail": f"Tool: {tool_name}"}
+    count    = len(records)
+    totals   = _compute_totals(records)
+    col_info = _records_to_rows(records, tool_name)
+    title    = tool_name.replace("ZohoBooks_", "").replace("_", " ").title()
+    primary  = next((f for f in _AMOUNT_FIELDS if f in totals), None)
+    footer   = f"Showing {count} records"
+    if primary:
+        footer += f"  ·  Total {primary.replace('_', ' ').title()}: ₹{totals[primary]:,.2f}"
+    if more_pages:
+        footer += "  ·  Loading more…"
+    structured: dict = {
+        "format":   "table",
+        "title":    title,
+        "columns":  col_info["columns"],
+        "col_keys": col_info["col_keys"],
+        "rows":     col_info["rows"],
+        "footer":   footer,
+    }
+    if more_pages:
+        structured["__more_pages__"] = True
+    return structured
 
-    return _json.dumps({
-        "format":  "table",
-        "title":   tool_name.replace("ZohoBooks_", "").replace("_", " ").title(),
-        "columns": [c.replace("_", " ").title() for c in cols],
-        "rows":    rows,
-        "footer":  footer,
-    })
+
+def _fast_fallback_summary(result: Any, tool_name: str) -> str:
+    return json.dumps(_build_table_structured(result, tool_name))
 
 
 def structured_to_markdown(data: dict) -> str:
@@ -752,69 +742,94 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             last_tool = last_step.get("tool", "")
             user_q    = last_step.get("note", "")
 
-            # ── Progressive pagination ─────────────────────────────────────
-            # If execute_step flagged that more pages exist, we:
-            # 1. Summarise page 1 immediately and emit it to the client
-            # 2. Start a background loop fetching remaining pages
-            # 3. Each new page emits table_append SSE events so the frontend
-            #    can extend the live table while the user is reading
+            # ── Decide: Python table vs Gemini for non-table formats ──────
+            # Table queries (list/show records) → built entirely in Python.
+            #   Instant, consistent columns, works for any entity type, no timeout risk.
+            # Aggregation / single record / action → Gemini for natural language.
+
             paginate_meta = None
             if isinstance(last_result, dict):
                 paginate_meta = last_result.pop("__paginate__", None)
 
-            # Helper: run Gemini summarizer and yield structured + tokens
-            async def _summarise_and_emit(result: Any, is_page1: bool) -> Optional[dict]:
-                nonlocal full_json
-                result_str   = _safe_result_str(result)
-                prompt_inner = (
-                    f"USER_QUESTION: {user_q or '(not specified — use best judgement on format)'}\n"
+            # Peek: does the user want a table or a computed answer?
+            q_lower = user_q.lower()
+            wants_table = (
+                paginate_meta is not None           # definitely a list
+                or not any(kw in q_lower for kw in (
+                    "total","sum","how many","count","average","amount",
+                    "what is","tell me","calculate","add up",
+                ))
+            )
+            _, sample_records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
+            wants_table = wants_table and len(sample_records) > 1
+
+            t_summ_start = time.monotonic()
+
+            if wants_table:
+                # ── Fast path: Python builds the table, zero Gemini calls ──
+                structured = _build_table_structured(
+                    last_result, last_tool, more_pages=bool(paginate_meta)
+                )
+                # Strip internal key before sending to client
+                structured.pop("col_keys", None)
+                log.info("table_built_python", extra={
+                    "cid": cid, "rows": len(structured.get("rows", [])),
+                    "ms": int((time.monotonic()-t_summ_start)*1000),
+                })
+            else:
+                # ── Gemini path: aggregation, single record, or action ─────
+                # For aggregation: pre-compute numbers in Python and send
+                # only the summary to Gemini — not the raw records.
+                if len(sample_records) > 1:
+                    totals   = _compute_totals(sample_records)
+                    primary  = next((f for f in _AMOUNT_FIELDS if f in totals), None)
+                    gemini_input = {
+                        "record_count": len(sample_records),
+                        "totals":       {k: round(v, 2) for k, v in totals.items()},
+                        "sample":       sample_records[:3],   # 3 examples for context
+                    }
+                else:
+                    gemini_input = last_result   # single record — send as-is
+
+                result_str    = _safe_result_str(gemini_input)
+                prompt_gemini = (
+                    f"USER_QUESTION: {user_q or '(not specified)'}\n"
                     f"TOOL: {last_tool}\n"
-                    f"ARGS: {json.dumps(last_step.get('args', {}), default=str)}\n"
                     f"RESULT: {result_str}"
                 )
-                timeout_inner = max(GEMINI_TIMEOUT, min(180.0, len(result_str) / 2000))
                 buf = ""
-
-                async def _collect() -> None:
+                async def _collect_g() -> None:
                     nonlocal buf
                     async for chunk in await a.gemini.aio.models.generate_content_stream(
                         model=MODEL,
-                        contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=prompt_inner)])],
+                        contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=prompt_gemini)])],
                         config=gtypes.GenerateContentConfig(
                             system_instruction=SUMMARIZE_SYSTEM,
                             temperature=0.1,
                             response_mime_type="application/json",
-                            max_output_tokens=65536,
+                            max_output_tokens=4096,   # answer/panel/status are small
                         ),
                     ):
                         buf += chunk.text or ""
 
                 try:
-                    await asyncio.wait_for(_collect(), timeout=timeout_inner)
+                    await asyncio.wait_for(_collect_g(), timeout=GEMINI_TIMEOUT)
                 except asyncio.TimeoutError:
                     log.warning("summarize_timeout", extra={"cid": cid, "tool": last_tool})
-                    if not (buf.strip().endswith("}") or buf.strip().endswith("]")):
-                        buf = _fast_fallback_summary(result, last_tool)
+                    buf = _fast_fallback_summary(last_result, last_tool)
 
-                cleaned_inner = re.sub(r"^```(?:json)?\s*|\s*```$", "", buf.strip(), flags=re.MULTILINE).strip()
+                cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", buf.strip(), flags=re.MULTILINE).strip()
                 try:
-                    structured_inner = json.loads(cleaned_inner)
+                    structured = json.loads(cleaned)
                 except Exception:
-                    structured_inner = {"format": "status", "ok": True, "headline": cleaned_inner or "Done."}
+                    structured = {"format": "status", "ok": True, "headline": cleaned or "Done."}
 
-                if is_page1 and paginate_meta:
-                    # Mark this as the first page of a progressive table —
-                    # the frontend will show a loading indicator
-                    structured_inner["__more_pages__"] = True
+            log.info("summarize_latency", extra={
+                "cid": cid, "ms": int((time.monotonic()-t_summ_start)*1000),
+                "path": "python" if wants_table else "gemini",
+            })
 
-                return structured_inner
-
-            t_summ_start = time.monotonic()
-            full_json    = ""
-            structured   = await _summarise_and_emit(last_result, is_page1=bool(paginate_meta))
-            log.info("summarize_latency", extra={"cid": cid, "ms": int((time.monotonic()-t_summ_start)*1000)})
-
-            # Emit page 1 tokens immediately
+            # Emit tokens
             reply_md = structured_to_markdown(structured)
             CHUNK = 80
             for i in range(0, len(reply_md), CHUNK):
@@ -828,19 +843,21 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                        "session_id": sess.session_id, "tools_used": tools_used})
 
             # ── Background pagination ──────────────────────────────────────
-            # After sending done, keep the SSE connection open and stream
-            # additional pages silently. Each page emits table_append.
+            # Page 1 is already rendered. Silently fetch remaining pages and
+            # stream rows directly — no Gemini involved at all.
             if paginate_meta:
-                pg_tool = paginate_meta["tool"]
-                pg_args = dict(paginate_meta["args"])
-                page    = 2
-                total_fetched = _count_records(last_result)
+                pg_tool       = paginate_meta["tool"]
+                pg_args       = dict(paginate_meta["args"])
+                # Reuse the same column keys page 1 used for perfect alignment
+                col_keys      = _detect_cols(sample_records, pg_tool)
+                page          = 2
+                total_fetched = len(sample_records)
 
                 while page <= MAX_AUTOPAGINATE_PAGES:
                     pg_args["page"] = page
                     log.info("bg_paginate_fetch", extra={"tool": pg_tool, "page": page, "cid": cid})
                     try:
-                        raw_page = await asyncio.wait_for(
+                        raw_page    = await asyncio.wait_for(
                             sess.mcp_session.call_tool(pg_tool, pg_args),
                             timeout=TOOL_TIMEOUT,
                         )
@@ -854,17 +871,17 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         break
 
                     total_fetched += len(page_records)
-                    has_more = _has_more_pages(page_result)
+                    has_more       = _has_more_pages(page_result)
 
-                    # Build slim rows using the same column logic as fast_fallback
-                    rows = _records_to_rows(page_records)
+                    # Build rows using exactly the same columns as page 1
+                    rows = [[str(r.get(c, "")) for c in col_keys]
+                            for r in page_records if isinstance(r, dict)]
                     yield sse({
-                        "type":          "table_append",
-                        "rows":          rows["rows"],
-                        "columns":       rows["columns"],
-                        "total_so_far":  total_fetched,
-                        "has_more":      has_more,
-                        "page":          page,
+                        "type":         "table_append",
+                        "rows":         rows,
+                        "total_so_far": total_fetched,
+                        "has_more":     has_more,
+                        "page":         page,
                     })
                     await asyncio.sleep(0)
 
@@ -872,7 +889,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         break
                     page += 1
 
-                # Signal that all pages have been fetched
                 yield sse({"type": "table_complete", "total": total_fetched})
 
         except asyncio.CancelledError:
@@ -919,12 +935,3 @@ async def delete_session(session_id: str) -> dict:
     if not await _app().sessions.delete(session_id):
         raise HTTPException(404, "Session not found.")
     return {"deleted": session_id}
-
-BASE_DIR = Path(__file__).resolve().parent
-
-
-@app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
-    return FileResponse(BASE_DIR / "favicon.ico", media_type="image/x-icon")
-
-
