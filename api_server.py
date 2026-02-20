@@ -985,8 +985,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             sess.state.clear_workflow()
             sess.touch()
 
-            # Strip internal keys before sending structured to client
-            client_structured = {k: v for k, v in structured.items() if not k.startswith("__") and k != "col_keys"}
+            # Strip only col_keys (internal column key array) before sending to client.
+            # DO NOT strip __more_pages__ — the frontend needs it to set id="liveTable"
+            # on the table element so table_append events can find and append rows to it.
+            client_structured = {k: v for k, v in structured.items() if k != "col_keys"}
             yield sse({"type": "done", "structured": client_structured,
                        "session_id": sess.session_id, "tools_used": tools_used})
 
