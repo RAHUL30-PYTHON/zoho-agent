@@ -22,6 +22,9 @@ from google import genai
 from google.genai import types as gtypes
 from mcp import ClientSession
 from mcp.client.sse import sse_client
+from pathlib import Path
+from fastapi.responses import FileResponse
+
 try:
     from mcp.client.streamable_http import streamable_http_client
 except ImportError:
@@ -1038,3 +1041,4 @@ BASE_DIR = Path(__file__).resolve().parent
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return FileResponse(BASE_DIR / "favicon.ico", media_type="image/x-icon")
+
