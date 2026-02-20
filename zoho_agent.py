@@ -54,8 +54,6 @@ except ImportError:
 load_dotenv("api.env")
 
 MODEL: str                   = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
-# Optionally use a faster model just for planning (e.g. gemini-1.5-flash-8b or gemini-2.0-flash)
-# Summarizer always uses MODEL since it needs to handle large outputs
 PLANNER_MODEL: str           = os.getenv("GEMINI_PLANNER_MODEL", MODEL)
 MAX_MEMORY_TOKENS: int       = int(os.getenv("MAX_MEMORY_TOKENS", "24000"))
 MAX_MEMORY_ENTRIES: int      = int(os.getenv("MAX_MEMORY_ENTRIES", "60"))
@@ -68,13 +66,12 @@ TOOL_TIMEOUT: float          = float(os.getenv("TOOL_TIMEOUT_SECONDS", "30"))
 GEMINI_TIMEOUT: float        = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "60"))
 CIRCUIT_BREAK_THRESHOLD: int = int(os.getenv("CIRCUIT_BREAK_THRESHOLD", "3"))
 CIRCUIT_BREAK_RESET_S: int   = int(os.getenv("CIRCUIT_BREAK_RESET_SECONDS", "120"))
-# Max chars of raw result sent to summarizer — prevents Gemini 400 on huge payloads
 SUMMARIZE_INPUT_CHAR_LIMIT: int = int(os.getenv("SUMMARIZE_INPUT_CHAR_LIMIT", "400000"))
 
 REQUIRED_ENV_VARS = ["GEMINI_API_KEY"]
 
 # ---------------------------------------------------------------------------
-# Logging — proper JSON formatter that always emits extra= fields
+# Logging
 # ---------------------------------------------------------------------------
 _LOG_RECORD_BUILTINS = frozenset({
     "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
@@ -331,7 +328,7 @@ def validate_args(meta: ToolMeta, args: dict) -> tuple[list[str], list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Memory — summarize-before-evict, full result storage
+# Memory
 # ---------------------------------------------------------------------------
 def _estimate_tokens(obj: Any) -> int:
     return max(1, len(json.dumps(obj, default=str)) // 4)
@@ -386,11 +383,6 @@ def add_memory(
     gemini_client: Optional[Any] = None,
     cid: str = "",
 ) -> Optional[asyncio.Task]:
-    """
-    Append a full entry to memory. When over-budget, summarise the oldest half
-    via Gemini (async fire-and-forget) instead of blindly evicting.
-    Falls back to eviction when no Gemini client is available.
-    """
     memory.append(entry)
 
     total_tokens = sum(_estimate_tokens(m) for m in memory)
@@ -400,7 +392,6 @@ def add_memory(
     if not (over_entries or over_tokens):
         return None
 
-    # Strategy 1: async summarisation
     if gemini_client is not None:
         split        = len(memory) // 2
         to_summarize = memory[:split]
@@ -414,9 +405,8 @@ def add_memory(
             task = asyncio.get_running_loop().create_task(_do_summarize())
             return task
         except RuntimeError:
-            pass  # no running loop — fall through
+            pass
 
-    # Strategy 2: eviction fallback
     while len(memory) > max(4, MAX_MEMORY_ENTRIES):
         memory.pop(0)
     while len(memory) > 4 and sum(_estimate_tokens(m) for m in memory) > MAX_MEMORY_TOKENS:
@@ -486,17 +476,9 @@ C) Confirm before risky / irreversible action:
 
 
 def _slim_toolbox(toolbox: dict[str, ToolMeta], user_msg: str, memory: list[dict]) -> dict:
-    """
-    Return a trimmed toolbox for the planner.
-    Always include all tools but strip the heavy schema/allowed fields from
-    tools that are clearly irrelevant to the user message + recent memory.
-    This cuts planner payload by ~60-70% without losing decision quality.
-    """
-    # Keywords from user message and recent tool calls to identify relevant tools
     user_lower = user_msg.lower()
     recent_tools = {m.get("tool", "") for m in memory[-6:] if "tool" in m}
 
-    # Domain keywords → tool name substrings
     DOMAIN_HINTS = [
         ({"invoice", "invoic", "receivable", "receive", "customer payment"}, "invoice"),
         ({"bill", "payable", "vendor payment", "pay vendor"}, "bill"),
@@ -526,11 +508,8 @@ def _slim_toolbox(toolbox: dict[str, ToolMeta], user_msg: str, memory: list[dict
         is_relevant = not relevant_substrings or any(s in name_lower for s in relevant_substrings)
 
         if is_recent or is_relevant:
-            # Full detail for relevant/recently-used tools
             slim[name] = meta.to_planner_dict()
         else:
-            # Minimal stub for everything else — name + desc only so planner
-            # knows the tool exists but won't be tempted to use it
             slim[name] = {"desc": meta.desc[:80], "read_only": meta.read_only}
 
     return slim
@@ -546,7 +525,7 @@ def _build_planner_payload(
         {
             "TOOLBOX": _slim_toolbox(toolbox, user_msg, memory),
             "STATE":   state.to_dict(),
-            "MEMORY":  memory[-12:],   # last 12 entries is enough for planning
+            "MEMORY":  memory[-12:],
             "USER":    user_msg,
         },
         ensure_ascii=False,
@@ -568,13 +547,13 @@ async def gemini_plan(
     async def _call() -> dict:
         resp = await asyncio.wait_for(
             client.aio.models.generate_content(
-                model=PLANNER_MODEL,   # can be a faster model than summarizer
+                model=PLANNER_MODEL,
                 contents=[types.Content(role="user", parts=[types.Part(text=payload)])],
                 config=types.GenerateContentConfig(
                     system_instruction=PLANNER_SYSTEM,
-                    temperature=0.2,   # lower = more deterministic = faster
+                    temperature=0.2,
                     response_mime_type="application/json",
-                    max_output_tokens=2048,  # plans are small; 8192 was wasteful
+                    max_output_tokens=2048,
                 ),
             ),
             timeout=GEMINI_TIMEOUT,
@@ -660,7 +639,6 @@ def _render_structured(data: dict) -> str:
     fmt = data.get("format", "status")
 
     if fmt == "answer":
-        # Direct answer to an aggregation/computation question
         question  = data.get("question", "")
         answer    = data.get("answer", "Done.")
         breakdown = data.get("breakdown") or []
@@ -776,7 +754,6 @@ async def _stream_collect_json(
     cid: str,
     timeout: Optional[float] = None,
 ) -> str:
-    """Stream JSON tokens from Gemini, return full text. Falls back to non-streaming."""
     effective_timeout = timeout or GEMINI_TIMEOUT
     full = ""
     try:
@@ -814,7 +791,6 @@ async def _stream_collect_json(
         return resp.text or "{}"
 
 
-# Fields in Zoho API responses that add no display value but inflate payload size
 _ZOHO_NOISE_FIELDS: frozenset[str] = frozenset({
     "created_time", "last_modified_time", "created_by", "last_modified_by",
     "submitted_date", "submitted_by", "approved_date", "approved_by",
@@ -837,7 +813,6 @@ _ZOHO_NOISE_FIELDS: frozenset[str] = frozenset({
 
 
 def _strip_noise(obj: Any, depth: int = 0) -> Any:
-    """Recursively strip noise fields from Zoho API response objects."""
     if depth > 4:
         return obj
     if isinstance(obj, dict):
@@ -852,18 +827,11 @@ def _strip_noise(obj: Any, depth: int = 0) -> Any:
 
 
 def _safe_result_str(result: Any, char_limit: int = SUMMARIZE_INPUT_CHAR_LIMIT) -> str:
-    """
-    Serialize a tool result for Gemini.
-    1. Strip known Zoho noise fields first (cuts size 30-50%).
-    2. If still over limit, extract just the largest record array.
-    3. Hard-truncate only as last resort.
-    """
     cleaned = _strip_noise(result)
     full = json.dumps(cleaned, default=str, ensure_ascii=False)
     if len(full) <= char_limit:
         return full
 
-    # Try to find the largest array in the top-level dict
     if isinstance(cleaned, dict):
         best_key, best_arr = "", []
         for k, v in cleaned.items():
@@ -897,7 +865,6 @@ async def gemini_summarize(
         f"ARGS: {json.dumps(args, default=str)}\n"
         f"RESULT: {result_str}"
     )
-    # Large results need more time — scale timeout with payload size
     timeout = max(GEMINI_TIMEOUT, min(180.0, len(result_str) / 2000))
     raw     = await _stream_collect_json(client, prompt, SUMMARIZE_SYSTEM,
                                          correlation_id, timeout=timeout)
@@ -930,7 +897,6 @@ def normalize_plan(plan: Any) -> dict:
 # Auto-pagination helper
 # ---------------------------------------------------------------------------
 MAX_AUTOPAGINATE_PAGES: int = int(os.getenv("MAX_AUTOPAGINATE_PAGES", "20"))
-# List-tool name substrings that support pagination
 _PAGEABLE_TOOL_SUBSTRINGS = (
     "list_invoices", "list_bills", "list_contacts", "list_items",
     "list_expenses", "list_payments", "list_creditnotes", "list_estimates",
@@ -945,34 +911,112 @@ def _is_pageable(tool_name: str) -> bool:
 
 
 def _extract_records(result: Any) -> tuple[str, list]:
-    """Return (key, records_list) for the largest list in a Zoho result dict."""
+    """
+    Return (key, records_list) for the largest meaningful list in a Zoho result dict.
+
+    FIX: Skip the MCP envelope keys ('content', 'meta', 'isError') so we never
+    accidentally treat the MCP wrapper as the record list.
+    The MCP wrapper looks like: {"content": [{"type":"text","text":"<json>"}], "isError": false}
+    We want the inner Zoho data, not the envelope.
+    """
     if not isinstance(result, dict):
         return "", []
+
+    # Keys that belong to the MCP transport envelope — never treat as record lists
+    _MCP_ENVELOPE_KEYS = frozenset({"content", "meta", "isError", "_meta"})
+
     best_key, best_arr = "", []
     for k, v in result.items():
-        if isinstance(v, list) and len(v) > len(best_arr) and k != "page_context":
+        if k in _MCP_ENVELOPE_KEYS:
+            continue
+        if k == "page_context":
+            continue
+        if isinstance(v, list) and len(v) > len(best_arr):
             best_key, best_arr = k, v
     return best_key, best_arr
 
 
 def _has_more_pages(result: Any) -> bool:
-    """Return True if the Zoho response indicates more pages exist."""
     if not isinstance(result, dict):
         return False
-    # page_context at top level
     pc = result.get("page_context") or {}
     if isinstance(pc, dict) and pc.get("has_more_page"):
         return True
-    # some endpoints nest it differently
     for v in result.values():
         if isinstance(v, dict) and v.get("has_more_page"):
             return True
     return False
 
 
+def _unwrap_mcp_result(raw: Any) -> Any:
+    """
+    Unwrap the MCP tool call envelope to get the actual Zoho API response.
+
+    MCP returns results in this shape after model_dump():
+      {
+        "content": [{"type": "text", "text": "<JSON string of Zoho response>"}],
+        "isError": false
+      }
+
+    We need to:
+    1. Detect this envelope structure
+    2. Extract the text content
+    3. Parse it as JSON to get the actual Zoho data dict
+
+    If the result is already a plain dict (not wrapped), return it as-is.
+    If parsing fails at any step, return the original so nothing breaks.
+    """
+    if not isinstance(raw, dict):
+        return raw
+
+    content = raw.get("content")
+    if not isinstance(content, list) or not content:
+        # Not an MCP envelope — already unwrapped or different shape
+        return raw
+
+    # Check if this looks like an MCP content envelope
+    # (list of {"type": "text", "text": "..."} items)
+    first = content[0] if content else {}
+    if not isinstance(first, dict) or first.get("type") != "text":
+        return raw
+
+    text_value = first.get("text", "")
+    if not isinstance(text_value, str) or not text_value.strip():
+        return raw
+
+    # The text field contains the JSON-encoded Zoho API response
+    try:
+        parsed = json.loads(text_value)
+        log.debug("mcp_envelope_unwrapped", extra={
+            "keys": list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__
+        })
+        return parsed
+    except json.JSONDecodeError:
+        # Not JSON — might be a plain text message or error; return original
+        log.warning("mcp_text_not_json", extra={"preview": text_value[:120]})
+        return raw
+
+
 def _parse_mcp_result(raw: Any) -> Any:
-    """Normalise a raw MCP tool result the same way execute_step does."""
-    return raw.model_dump() if hasattr(raw, "model_dump") else raw
+    """
+    Convert a raw MCP tool call result into a plain Python dict.
+
+    Steps:
+    1. Call model_dump() if it's a Pydantic model
+    2. Unwrap the MCP content envelope ({"content":[{"type":"text","text":"<json>"}]})
+    3. Return the actual Zoho API response dict
+    """
+    # Step 1: Convert Pydantic model to dict
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump()
+
+    # Step 2: Unwrap MCP envelope — THIS IS THE KEY FIX
+    # Before this fix, _extract_records would find "content" as the largest list
+    # and treat [{"type":"text","text":"..."}] as the record list, producing
+    # TYPE/TEXT columns with raw JSON in the cells.
+    raw = _unwrap_mcp_result(raw)
+
+    return raw
 
 
 async def _autopaginate(
@@ -983,10 +1027,6 @@ async def _autopaginate(
     audit: "AuditLog",
     correlation_id: str,
 ) -> Any:
-    """
-    Given the first page result, fetch all remaining pages and merge
-    the record lists. Returns a single combined result dict.
-    """
     record_key, all_records = _extract_records(first_result)
     if not record_key or not all_records:
         return first_result
@@ -1021,10 +1061,8 @@ async def _autopaginate(
                     records=len(page_records), cid=correlation_id)
         page += 1
 
-    # Return merged result: replace the record list with all_records
     merged = dict(first_result)
     merged[record_key] = all_records
-    # Update page_context to reflect the full set
     if "page_context" in merged and isinstance(merged["page_context"], dict):
         merged["page_context"] = {
             **merged["page_context"],
@@ -1122,11 +1160,10 @@ async def execute_step(
 
     elapsed     = round(time.monotonic() - t0, 2)
     cb.record_success()
+
+    # FIX: Use the updated _parse_mcp_result which now unwraps the MCP envelope
     result_data = _parse_mcp_result(result)
 
-    # If this is a pageable list tool with more pages, flag it so the API
-    # stream handler can render page 1 immediately and fetch the rest in the
-    # background while the user reads — progressive loading.
     if _is_pageable(tool_name) and _has_more_pages(result_data):
         result_data["__paginate__"] = {
             "tool":   tool_name,
@@ -1410,4 +1447,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
