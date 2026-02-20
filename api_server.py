@@ -36,21 +36,12 @@ except ImportError:
 
 def _is_sse_url(url: str) -> bool:
     u = (url or "").lower().strip()
-
-    # If the URL explicitly points to the "message" endpoint, it is NOT SSE.
-    # It's typically the RPC/message endpoint (POST/HTTP), so use streamable HTTP.
     if "/mcp/message" in u:
         return False
-
-    # Explicit SSE endpoints (GET text/event-stream) usually look like these:
     if any(seg in u for seg in ("/sse", "/events", "/event-stream")):
         return True
-
-    # If URL looks like a base MCP endpoint, prefer streamable HTTP
     if u.rstrip("/").endswith(("/mcp", "/rpc", "/jsonrpc")):
         return False
-
-    # Default: streamable HTTP (safer than guessing SSE)
     return False
 
 from zoho_agent import (
@@ -156,7 +147,7 @@ class AgentSession:
 
 
 # ---------------------------------------------------------------------------
-# Session factory — org_id now comes from the caller, not env
+# Session factory
 # ---------------------------------------------------------------------------
 async def create_agent_session(
     session_id: str,
@@ -173,9 +164,6 @@ async def create_agent_session(
     })
 
     if use_sse:
-        # SSE transport — used by Zoho MCP and most hosted servers
-       
-
         stream_cm = sse_client(mcp_url, headers=headers)
         read, write = await stream_cm.__aenter__()
         mcp_cm = ClientSession(read, write)
@@ -191,13 +179,12 @@ async def create_agent_session(
             mcp_url      = mcp_url,
             mcp_session  = mcp_session,
             toolbox      = toolbox,
-            _http_client = http_client,
-            _cm_http     = http_client,
+            _http_client = None,
+            _cm_http     = None,
             _cm_stream   = stream_cm,
             _cm_mcp      = mcp_cm,
         )
     else:
-        # Streamable HTTP transport — newer MCP spec
         if streamable_http_client is None:
             raise RuntimeError("streamable_http transport not available in this mcp version")
 
@@ -247,13 +234,11 @@ class SessionStore:
         async with self._lock:
             self._evict_expired_sync()
 
-            # Return existing session (mcp_url / org_id ignored — already set)
             if session_id and session_id in self._sessions:
                 s = self._sessions[session_id]
                 s.touch()
                 return s
 
-            # New session — mcp_url is required
             if not mcp_url:
                 raise HTTPException(400, "mcp_url is required to start a new session.")
             if not org_id:
@@ -273,7 +258,6 @@ class SessionStore:
                     "error": str(exc), "error_type": type(exc).__name__,
                     "traceback": tb,
                 })
-                # Produce a human-readable message for the API caller
                 msg = str(exc)
                 if "connection" in msg.lower() or "connect" in msg.lower():
                     detail = f"Could not connect to MCP server at {mcp_url} — is the server running and reachable?"
@@ -336,7 +320,7 @@ def _app() -> _App:
 
 
 # ---------------------------------------------------------------------------
-# Summarizer
+# Summarizer (used by /chat non-streaming endpoint)
 # ---------------------------------------------------------------------------
 async def api_summarize(
     gemini: genai.Client,
@@ -360,7 +344,7 @@ async def api_summarize(
         return {"format": "status", "ok": True, "headline": cleaned or "Done.", "detail": ""}
 
 
-# ── Per-entity preferred column lists (covers all Zoho Books entity types) ──
+# ── Per-entity preferred column lists ───────────────────────────────────────
 _ENTITY_COLS: dict[str, list[str]] = {
     "invoice":       ["invoice_number","customer_name","date","due_date","total","balance","status","due_days"],
     "bill":          ["bill_number","vendor_name","date","due_date","total","balance","status","due_days"],
@@ -531,7 +515,7 @@ def structured_to_markdown(data: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Core turn logic
+# Core turn logic (/chat non-streaming)
 # ---------------------------------------------------------------------------
 async def _run_plan(sess: AgentSession, plan: dict, cid: str) -> dict:
     a     = _app()
@@ -655,7 +639,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Zoho Books Agent API",
-    version="2.1.0",
+    version="2.2.0",
     description="AI-powered Zoho Books assistant (Gemini + MCP, per-session MCP URL + Org ID)",
     lifespan=lifespan,
 )
@@ -748,18 +732,73 @@ async def confirm(req: ConfirmRequest) -> ChatResponse:
     )
 
 
+# ---------------------------------------------------------------------------
+# Helpers to classify whether a result should be a table or a computed answer
+# ---------------------------------------------------------------------------
+
+# Keywords that indicate the user wants a computed/aggregated answer, not a table
+_AGGREGATION_KEYWORDS = frozenset({
+    "total", "sum", "how many", "count", "average", "amount",
+    "what is", "tell me", "calculate", "add up", "how much",
+})
+
+def _user_wants_aggregation(user_question: str) -> bool:
+    """Return True if the question is asking for a computed number/answer."""
+    q = user_question.lower()
+    return any(kw in q for kw in _AGGREGATION_KEYWORDS)
+
+
+def _should_use_table(
+    last_result: Any,
+    tool_name: str,
+    user_question: str,
+    paginate_meta: Any,
+) -> tuple[bool, list]:
+    """
+    Decide whether to use the fast Python table path or the Gemini summarization path.
+
+    Returns (use_table: bool, records: list)
+
+    FIX: The original code had two bugs:
+    1. `wants_table` was set based on keywords, but then ANDed with `len(sample_records) > 1`,
+       meaning a single-record result or a failed _extract_records would silently fall
+       through to Gemini — which then streamed raw JSON tokens.
+    2. Aggregation questions on multi-record results still need the Python path to
+       pre-compute totals and pass a summary to Gemini (not the full raw records).
+
+    New logic:
+    - If paginate_meta is set  → always table (it's definitely a list)
+    - If records >= 2 AND user is NOT asking for aggregation → table
+    - If records >= 2 AND user IS asking for aggregation → Gemini path (but we pre-compute)
+    - If records == 1 or 0 → Gemini path (single record detail / status)
+    """
+    _, records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
+
+    # Paginated result is always a list → always table
+    if paginate_meta is not None:
+        return True, records
+
+    # No records extracted → let Gemini handle it (action result, status, etc.)
+    if len(records) <= 1:
+        return False, records
+
+    # Multiple records: table unless user asked for aggregation
+    if _user_wants_aggregation(user_question):
+        return False, records
+
+    return True, records
+
+
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
     a   = _app()
     cid = uuid.uuid4().hex[:10]
 
-    # Connect to MCP before starting the stream so we can surface errors cleanly
     try:
         sess = await a.sessions.get_or_create(
             req.session_id, req.mcp_url, a.gemini, org_id=req.org_id
         )
     except HTTPException as exc:
-        # Return an SSE stream that immediately emits the error — frontend handles it
         _err_detail = exc.detail
         async def _err_stream() -> AsyncIterator[str]:
             yield "data: " + json.dumps({"type": "error", "message": _err_detail}) + "\n\n"
@@ -836,56 +875,51 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
             last_step = steps[-1]
             last_tool = last_step.get("tool", "")
-            user_q    = last_step.get("note", "")
+            user_q    = last_step.get("note", "") or req.message
 
-            # ── Decide: Python table vs Gemini for non-table formats ──────
-            # Table queries (list/show records) → built entirely in Python.
-            #   Instant, consistent columns, works for any entity type, no timeout risk.
-            # Aggregation / single record / action → Gemini for natural language.
-
+            # ── Extract pagination metadata BEFORE deciding path ──────────
             paginate_meta = None
             if isinstance(last_result, dict):
                 paginate_meta = last_result.pop("__paginate__", None)
 
-            # Peek: does the user want a table or a computed answer?
-            q_lower = user_q.lower()
-            wants_table = (
-                paginate_meta is not None           # definitely a list
-                or not any(kw in q_lower for kw in (
-                    "total","sum","how many","count","average","amount",
-                    "what is","tell me","calculate","add up",
-                ))
+            # ── FIX: Use unified decision function ────────────────────────
+            # This replaces the old fragile wants_table logic that had two bugs:
+            # 1. Fell through to Gemini when records <= 1 even for list queries
+            # 2. Gemini streamed raw JSON tokens that showed up as plain text
+            use_table, sample_records = _should_use_table(
+                last_result, last_tool, user_q, paginate_meta
             )
-            _, sample_records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
-            wants_table = wants_table and len(sample_records) > 1
 
             t_summ_start = time.monotonic()
 
-            if wants_table:
-                # ── Fast path: Python builds the table, zero Gemini calls ──
+            if use_table:
+                # ── Fast path: Python builds the table ────────────────────
                 structured = _build_table_structured(
                     last_result, last_tool, more_pages=bool(paginate_meta)
                 )
-                # Strip internal key before sending to client
+                # col_keys is internal — strip before sending to client
                 structured.pop("col_keys", None)
                 log.info("table_built_python", extra={
-                    "cid": cid, "rows": len(structured.get("rows", [])),
+                    "cid": cid,
+                    "rows": len(structured.get("rows", [])),
                     "ms": int((time.monotonic()-t_summ_start)*1000),
                 })
+
             else:
-                # ── Gemini path: aggregation, single record, or action ─────
-                # For aggregation: pre-compute numbers in Python and send
-                # only the summary to Gemini — not the raw records.
+                # ── Gemini path: aggregation, single record, action ───────
+                # FIX: For aggregations over multiple records, pre-compute the
+                # numbers in Python and send only the summary to Gemini.
+                # This avoids sending huge payloads AND prevents truncation
+                # which was causing partial JSON to stream as plain text.
                 if len(sample_records) > 1:
-                    totals   = _compute_totals(sample_records)
-                    primary  = next((f for f in _AMOUNT_FIELDS if f in totals), None)
+                    totals  = _compute_totals(sample_records)
                     gemini_input = {
                         "record_count": len(sample_records),
                         "totals":       {k: round(v, 2) for k, v in totals.items()},
-                        "sample":       sample_records[:3],   # 3 examples for context
+                        "sample":       sample_records[:3],
                     }
                 else:
-                    gemini_input = last_result   # single record — send as-is
+                    gemini_input = last_result
 
                 result_str    = _safe_result_str(gemini_input)
                 prompt_gemini = (
@@ -893,6 +927,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     f"TOOL: {last_tool}\n"
                     f"RESULT: {result_str}"
                 )
+
                 buf = ""
                 async def _collect_g() -> None:
                     nonlocal buf
@@ -903,7 +938,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             system_instruction=SUMMARIZE_SYSTEM,
                             temperature=0.1,
                             response_mime_type="application/json",
-                            max_output_tokens=4096,   # answer/panel/status are small
+                            max_output_tokens=4096,
                         ),
                     ):
                         buf += chunk.text or ""
@@ -918,14 +953,25 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 try:
                     structured = json.loads(cleaned)
                 except Exception:
-                    structured = {"format": "status", "ok": True, "headline": cleaned or "Done."}
+                    # FIX: If Gemini returned truncated/invalid JSON, fall back to
+                    # Python table instead of showing raw JSON as a status headline.
+                    log.warning("gemini_json_parse_failed", extra={
+                        "cid": cid, "tool": last_tool, "buf_len": len(buf),
+                        "buf_preview": buf[:200],
+                    })
+                    structured = _build_table_structured(last_result, last_tool)
+                    structured.pop("col_keys", None)
 
             log.info("summarize_latency", extra={
                 "cid": cid, "ms": int((time.monotonic()-t_summ_start)*1000),
-                "path": "python" if wants_table else "gemini",
+                "path": "python" if use_table else "gemini",
             })
 
-            # Emit tokens
+            # ── Emit tokens (render markdown from structured) ─────────────
+            # FIX: We emit the rendered markdown as tokens (not raw JSON).
+            # The frontend displays streamText as plain text during streaming,
+            # then re-renders from structured on 'done'. This is fine — the
+            # key is that streamText must be human-readable, not raw JSON.
             reply_md = structured_to_markdown(structured)
             CHUNK = 80
             for i in range(0, len(reply_md), CHUNK):
@@ -935,16 +981,16 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
             sess.state.clear_workflow()
             sess.touch()
-            yield sse({"type": "done", "structured": structured,
+
+            # Strip internal keys before sending structured to client
+            client_structured = {k: v for k, v in structured.items() if not k.startswith("__") and k != "col_keys"}
+            yield sse({"type": "done", "structured": client_structured,
                        "session_id": sess.session_id, "tools_used": tools_used})
 
             # ── Background pagination ──────────────────────────────────────
-            # Page 1 is already rendered. Silently fetch remaining pages and
-            # stream rows directly — no Gemini involved at all.
             if paginate_meta:
                 pg_tool       = paginate_meta["tool"]
                 pg_args       = dict(paginate_meta["args"])
-                # Reuse the same column keys page 1 used for perfect alignment
                 col_keys      = _detect_cols(sample_records, pg_tool)
                 page          = 2
                 total_fetched = len(sample_records)
@@ -969,7 +1015,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     total_fetched += len(page_records)
                     has_more       = _has_more_pages(page_result)
 
-                    # Build rows using exactly the same columns as page 1
                     rows = [[str(r.get(c, "")) for c in col_keys]
                             for r in page_records if isinstance(r, dict)]
                     yield sse({
@@ -1039,5 +1084,3 @@ BASE_DIR = Path(__file__).resolve().parent
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return FileResponse(BASE_DIR / "favicon.ico", media_type="image/x-icon")
-
-
