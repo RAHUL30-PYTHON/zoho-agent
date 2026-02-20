@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Zoho Books AI</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="icon" href="/favicon.ico?v=9" sizes="any">
+<link rel="shortcut icon" href="/favicon.ico?v=9">
+
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <style>
@@ -23,8 +26,8 @@
     --red:          #ff4e6a;
     --red-dim:      #ff4e6a18;
     --text:         #e8edf5;
-    --text-2:       #8a96a8;
-    --text-3:       #4a5568;
+    --text-2:       #ebebeb;
+    --text-3:       #dfdfe0;
     --user-bg:      #0d1f1a;
     --user-border:  #00e5b030;
     --radius:       14px;
@@ -420,14 +423,14 @@
           </div>
           <div class="empty-title">What can I help with?</div>
           <div class="empty-sub">Ask me anything about your Zoho Books data — invoices, bills, contacts, payments, reports, and more.</div>
-          <div class="suggestions">
+          <!-- <div class="suggestions">
             <span class="suggestion-chip" onclick="sendSuggestion(this)">List unpaid bills</span>
             <span class="suggestion-chip" onclick="sendSuggestion(this)">Create an invoice</span>
             <span class="suggestion-chip" onclick="sendSuggestion(this)">Show aged receivables</span>
             <span class="suggestion-chip" onclick="sendSuggestion(this)">List all contacts</span>
             <span class="suggestion-chip" onclick="sendSuggestion(this)">Create a bill</span>
             <span class="suggestion-chip" onclick="sendSuggestion(this)">Show P&L report</span>
-          </div>
+          </div> -->
         </div>
       </div>
     </div>
@@ -460,28 +463,11 @@
 const API_BASE = window.location.origin;
 
 // ── State ────────────────────────────────────────────────────────
-let mcpUrl      = null;
-let orgId       = null;
-let sessionId   = null;
-let isStreaming  = false;
-
-// Thread model: each entry = { id, sessionId, title, messages[] }
-// messages[] = array of DOM-serialisable objects saved per turn
-let threads      = [];          // all threads, most-recent first
-let activeThread = null;        // the thread currently shown
-
-function _threadById(id) { return threads.find(t => t.id === id) || null; }
-function _activeOrNew() {
-  if (activeThread) return activeThread;
-  return _startThread();
-}
-function _startThread() {
-  const t = { id: crypto.randomUUID(), sessionId: null, title: 'New conversation', messages: [] };
-  threads.unshift(t);
-  if (threads.length > 30) threads.pop();
-  activeThread = t;
-  return t;
-}
+let mcpUrl    = null;
+let orgId     = null;   // ← collected in step 2
+let sessionId = null;
+let isStreaming= false;
+let history   = [];
 
 // ── DOM ──────────────────────────────────────────────────────────
 const messagesEl    = document.getElementById('messagesEl');
@@ -580,91 +566,27 @@ function truncateUrl(url) {
 
 // ── Chat helpers ─────────────────────────────────────────────────
 function newChat() {
-  // Save current messages into activeThread before starting fresh
-  if (activeThread) _saveActiveMessages();
-
-  // Create a new thread and clear the view
-  activeThread = null;
-  sessionId    = null;
-  sessionDisp.textContent = '—';
-  messagesInner.innerHTML = '';
-  messagesInner.appendChild(emptyState);
-  emptyState.style.display = 'flex';
-  inputBox.value = '';
-  autoResize(inputBox);
-  renderThreads();
+  sessionId = null; sessionDisp.textContent = '—';
+  messagesInner.innerHTML = ''; messagesInner.appendChild(emptyState);
+  emptyState.style.display = 'flex'; inputBox.value = ''; autoResize(inputBox);
 }
 
-// ── Thread persistence helpers ───────────────────────────────────
-
-/** Serialise current DOM messages into activeThread.messages */
-function _saveActiveMessages() {
-  if (!activeThread) return;
-  const msgs = [];
-  messagesInner.querySelectorAll('.msg').forEach(el => {
-    msgs.push(el.outerHTML);
-  });
-  activeThread.messages = msgs;
+function addToHistory(title, sid) {
+  history = history.filter(h => h.sessionId !== sid);
+  history.unshift({ title: title.slice(0,40), sessionId: sid });
+  if (history.length > 20) history.pop();
+  renderHistory();
 }
-
-/** Restore a thread's messages into the message pane */
-function _restoreThread(thread) {
-  messagesInner.innerHTML = '';
-  if (!thread.messages || thread.messages.length === 0) {
-    messagesInner.appendChild(emptyState);
-    emptyState.style.display = 'flex';
-    return;
-  }
-  // Restore saved HTML — re-attach confirm button handlers
-  thread.messages.forEach(html => {
-    const wrap = document.createElement('div');
-    wrap.innerHTML = html;
-    const node = wrap.firstElementChild;
-    // Re-wire confirm buttons if present
-    node.querySelectorAll('.confirm-yes').forEach(b => b.onclick = () => resolveConfirm(true));
-    node.querySelectorAll('.confirm-no').forEach(b  => b.onclick = () => resolveConfirm(false));
-    messagesInner.appendChild(node);
-  });
-  scrollBottom();
-}
-
-/** Update the active thread's title from the first user message */
-function _setThreadTitle(text) {
-  if (!activeThread) return;
-  if (activeThread.title === 'New conversation') {
-    activeThread.title = text.slice(0, 42) + (text.length > 42 ? '…' : '');
-  }
-}
-
-/** Render the sidebar thread list */
-function renderThreads() {
+function renderHistory() {
   historyList.innerHTML = '';
-  threads.forEach(t => {
+  history.forEach(h => {
     const el = document.createElement('div');
-    el.className = 'history-item' + (activeThread && t.id === activeThread.id ? ' active' : '');
-    el.innerHTML = `<svg class="history-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg><div class="history-item-text">${escHtml(t.title)}</div>`;
-    el.onclick = () => _switchThread(t.id);
+    el.className = 'history-item' + (h.sessionId === sessionId ? ' active' : '');
+    el.innerHTML = `<svg class="history-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg><div class="history-item-text">${escHtml(h.title)}</div>`;
+    el.onclick = () => { sessionId = h.sessionId; sessionDisp.textContent = sid6(h.sessionId); renderHistory(); };
     historyList.appendChild(el);
   });
 }
-
-/** Switch the visible thread */
-function _switchThread(id) {
-  if (activeThread && activeThread.id === id) return;
-  if (isStreaming) return;   // don't switch mid-stream
-  _saveActiveMessages();
-  const t = _threadById(id);
-  if (!t) return;
-  activeThread = t;
-  sessionId    = t.sessionId;
-  sessionDisp.textContent = sid6(sessionId);
-  _restoreThread(t);
-  renderThreads();
-}
-
-// Legacy shim — keep callers working
-function addToHistory(title, sid) { renderThreads(); }
-function renderHistory()          { renderThreads(); }
 
 const escHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 const sid6 = s => s ? s.slice(-6) : '—';
@@ -821,13 +743,8 @@ async function sendMessage() {
   const text = inputBox.value.trim();
   if (!text||isStreaming) return;
   inputBox.value=''; autoResize(inputBox); setLoading(true);
-
-  // Ensure there is an active thread
-  const thread = _activeOrNew();
-  _setThreadTitle(text);
-  renderThreads();
-
   appendUserMsg(text);
+  if (history.length===0||history[0]?.sessionId!==sessionId) addToHistory(text, sessionId||'new');
   appendTyping();
   try { await streamChat(text); }
   catch(err) { replaceBotMsg({type:'error',reply:'Network error: '+err.message},[],0); showToast('Connection failed. Is the server running?'); }
@@ -866,9 +783,7 @@ async function streamChat(message) {
       }
       else if (evt.type==='done') {
         const elapsed=Date.now()-t0;
-        if (evt.session_id) { sessionId=evt.session_id; sessionDisp.textContent=sid6(sessionId); // Bind session ID to active thread on first response
-          if (activeThread && !activeThread.sessionId) activeThread.sessionId=sessionId;
-          renderThreads(); }
+        if (evt.session_id) { sessionId=evt.session_id; sessionDisp.textContent=sid6(sessionId); addToHistory(message,sessionId); renderHistory(); }
         const fakeResult={type:'reply',structured:evt.structured,reply:streamText};
         if (streamDiv) {
           const bubble=streamDiv.querySelector('.msg-bubble');
@@ -879,7 +794,6 @@ async function streamChat(message) {
           const tools=(evt.tools_used||[]).slice(0,6).map(t=>`<span class="msg-tool-tag">${escHtml(t)}</span>`).join('');
           if(meta)meta.innerHTML=`<span>${time}</span><span class="elapsed">${elapsed}ms</span>${tools?`<div class="msg-tools">${tools}</div>`:''}`;
         }
-        _saveActiveMessages();
         scrollBottom();
       }
       else if (evt.type==='confirm') {
@@ -899,3 +813,9 @@ document.getElementById('mcpUrlInput').focus();
 </script>
 </body>
 </html>
+
+
+
+
+
+
