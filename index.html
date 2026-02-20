@@ -4,10 +4,9 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Zoho Books AI</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="icon" href="/favicon.ico?v=9" sizes="any">
+ <link rel="icon" href="/favicon.ico?v=9" sizes="any">
 <link rel="shortcut icon" href="/favicon.ico?v=9">
-
+<link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <style>
@@ -26,8 +25,8 @@
     --red:          #ff4e6a;
     --red-dim:      #ff4e6a18;
     --text:         #e8edf5;
-    --text-2:       #ebebeb;
-    --text-3:       #dfdfe0;
+    --text-2:       #8a96a8;
+    --text-3:       #4a5568;
     --user-bg:      #0d1f1a;
     --user-border:  #00e5b030;
     --radius:       14px;
@@ -131,38 +130,8 @@
   .setup-panel.hidden { display: none; }
 
   /* ── Shell ──────────────────────────────────────────────────── */
-  .shell { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: 100vh; height: 100vh; opacity: 0; pointer-events: none; transition: opacity .4s ease; }
+  .shell { display: grid; grid-template-columns: 1fr; grid-template-rows: 100vh; height: 100vh; opacity: 0; pointer-events: none; transition: opacity .4s ease; }
   .shell.visible { opacity: 1; pointer-events: all; }
-
-  /* Sidebar */
-  .sidebar { background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; position: relative; }
-  .sidebar::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); opacity: .6; }
-  .brand { padding: 24px 20px 20px; border-bottom: 1px solid var(--border); }
-  .brand-logo { display: flex; align-items: center; gap: 10px; }
-  .brand-icon { width: 32px; height: 32px; background: var(--accent); border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-  .brand-icon svg { width: 18px; height: 18px; color: #0a0c0f; }
-  .brand-name { font-size: 15px; font-weight: 700; letter-spacing: -.01em; color: var(--text); }
-  .brand-tag  { font-size: 10px; font-family: var(--font-mono); color: var(--accent); letter-spacing: .08em; text-transform: uppercase; margin-top: 1px; }
-
-  .new-chat-btn { margin: 16px 16px 8px; padding: 10px 14px; background: var(--accent-dim); border: 1px solid var(--accent-glow); border-radius: var(--radius-sm); color: var(--accent); font-family: var(--font-sans); font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; transition: var(--transition); letter-spacing: .02em; }
-  .new-chat-btn:hover { background: var(--accent); color: #0a0c0f; border-color: var(--accent); }
-  .new-chat-btn svg { width: 14px; height: 14px; }
-
-  .sidebar-section { padding: 8px 16px 4px; font-size: 10px; font-family: var(--font-mono); color: var(--text-3); letter-spacing: .1em; text-transform: uppercase; }
-  .history-list { flex: 1; overflow-y: auto; padding: 4px 10px 16px; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
-  .history-item { padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; display: flex; align-items: flex-start; gap: 8px; transition: var(--transition); }
-  .history-item:hover { background: var(--surface2); }
-  .history-item.active { background: var(--surface2); border: 1px solid var(--border-hi); }
-  .history-item-icon { width: 18px; height: 18px; flex-shrink: 0; margin-top: 1px; color: var(--text-3); }
-  .history-item-text { font-size: 12.5px; color: var(--text-2); line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; }
-  .history-item.active .history-item-text { color: var(--text); }
-
-  .sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
-  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); flex-shrink: 0; animation: pulse-dot 2.4s ease-in-out infinite; }
-  @keyframes pulse-dot { 0%,100% { opacity:1; box-shadow:0 0 8px var(--accent); } 50% { opacity:.5; box-shadow:0 0 3px var(--accent); } }
-  .status-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-family: var(--font-mono); color: var(--text-3); }
-  .status-row span { color: var(--text-2); }
-  .mcp-url-row { font-size: 10px; font-family: var(--font-mono); color: var(--text-3); word-break: break-all; line-height: 1.4; padding-top: 2px; }
 
   /* Main */
   .main { display: flex; flex-direction: column; height: 100vh; overflow: hidden; position: relative; background: var(--bg); }
@@ -220,6 +189,14 @@
   .msg-bubble td { padding: 5px 10px; color: var(--text-2); border-bottom: 1px solid var(--border); white-space: nowrap; }
   .msg-bubble tr:last-child td { border-bottom: none; }
   .msg-bubble tr:hover td { background: var(--surface2); }
+  .table-footer-live { display: flex; align-items: center; gap: 8px; }
+  .table-loading-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-family: var(--font-mono); color: var(--accent); background: var(--accent-dim); border: 1px solid var(--accent-glow); border-radius: 100px; padding: 2px 8px; }
+  .table-loading-dot { width: 5px; height: 5px; background: var(--accent); border-radius: 50%; animation: typing-bounce .9s ease-in-out infinite; }
+  .table-loading-dot:nth-child(1){animation-delay:0s}
+  .table-loading-dot:nth-child(2){animation-delay:.15s}
+  .table-loading-dot:nth-child(3){animation-delay:.3s}
+  @keyframes row-in { from { opacity:0; background: var(--accent-dim); } to { opacity:1; background: transparent; } }
+  .msg-bubble tr.row-new td { animation: row-in .4s ease both; }
   .answer-card { background: linear-gradient(135deg, #00e5b010, #00e5b005); border: 1px solid #00e5b040; border-radius: var(--radius-sm); padding: 16px 18px; margin: 4px 0; }
   .answer-question { font-size: 11px; font-family: var(--font-mono); color: var(--text-3); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 8px; }
   .answer-value { font-size: 20px; font-weight: 700; color: var(--accent); font-family: var(--font-sans); letter-spacing: -.02em; line-height: 1.3; margin-bottom: 10px; }
@@ -286,7 +263,7 @@
   .toast { position: fixed; bottom: 90px; right: 24px; background: var(--red-dim); border: 1px solid #ff4e6a30; border-radius: var(--radius-sm); padding: 10px 16px; font-size: 12.5px; font-family: var(--font-mono); color: var(--red); max-width: 320px; z-index: 999; display: none; }
   .toast.show { display: block; animation: toast-in .2s ease both; }
   @keyframes toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
-  @media (max-width: 760px) { .shell { grid-template-columns: 1fr; } .sidebar { display: none; } .messages-inner,.input-wrapper,.input-hint { padding: 0 16px; } .header { padding: 0 16px; } }
+  @media (max-width: 760px) { .messages-inner,.input-wrapper,.input-hint { padding: 0 16px; } .header { padding: 0 16px; } }
 </style>
 </head>
 <body>
@@ -364,44 +341,6 @@
 
 <!-- ── Shell ─────────────────────────────────────────────────── -->
 <div class="shell" id="shell">
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-logo">
-        <div class="brand-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
-          </svg>
-        </div>
-        <div>
-          <div class="brand-name">Zoho Books AI</div>
-          <div class="brand-tag">Finance Assistant</div>
-        </div>
-      </div>
-    </div>
-    <!-- <button class="new-chat-btn" onclick="newChat()">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
-      New conversation
-    </button>
-     -->
-    <div class="sidebar-section">In your conversation</div>
-    <div class="history-list" id="historyList"></div>
-    <div class="sidebar-footer">
-      <div class="status-row">
-        <div class="status-dot"></div>
-        <span id="connectionStatus">Connected</span>
-      </div>
-      <div class="status-row">
-        <span>Org ID:</span>
-        <span id="orgIdDisplay" style="color:var(--text-3);font-size:10px;">—</span>
-      </div>
-      <div class="status-row">
-        <span>Session:</span>
-        <span id="sessionDisplay" style="color:var(--text-3);font-size:10px;">—</span>
-      </div>
-      <div class="mcp-url-row" id="mcpUrlDisplay"></div>
-    </div>
-  </aside>
-
   <main class="main">
     <div class="header">
       <div class="header-left">
@@ -424,14 +363,14 @@
           </div>
           <div class="empty-title">What can I help with?</div>
           <div class="empty-sub">Ask me anything about your Zoho Books data — invoices, bills, contacts, payments, reports, and more.</div>
-          <!-- <div class="suggestions">
+          <div class="suggestions">
             <span class="suggestion-chip" onclick="sendSuggestion(this)">List unpaid bills</span>
             <span class="suggestion-chip" onclick="sendSuggestion(this)">Create an invoice</span>
             <span class="suggestion-chip" onclick="sendSuggestion(this)">Show aged receivables</span>
             <span class="suggestion-chip" onclick="sendSuggestion(this)">List all contacts</span>
             <span class="suggestion-chip" onclick="sendSuggestion(this)">Create a bill</span>
             <span class="suggestion-chip" onclick="sendSuggestion(this)">Show P&L report</span>
-          </div> -->
+          </div>
         </div>
       </div>
     </div>
@@ -464,11 +403,11 @@
 const API_BASE = window.location.origin;
 
 // ── State ────────────────────────────────────────────────────────
-let mcpUrl    = null;
-let orgId     = null;   // ← collected in step 2
-let sessionId = null;
-let isStreaming= false;
-let history   = [];
+let mcpUrl      = null;
+let orgId       = null;
+let sessionId   = null;
+let isStreaming  = false;
+
 
 // ── DOM ──────────────────────────────────────────────────────────
 const messagesEl    = document.getElementById('messagesEl');
@@ -477,7 +416,6 @@ const emptyState    = document.getElementById('emptyState');
 const inputBox      = document.getElementById('inputBox');
 const sendBtn       = document.getElementById('sendBtn');
 const sessionDisp   = document.getElementById('sessionDisplay');
-const historyList   = document.getElementById('historyList');
 const connStatus    = document.getElementById('connectionStatus');
 
 // ── Setup helpers ─────────────────────────────────────────────────
@@ -567,27 +505,16 @@ function truncateUrl(url) {
 
 // ── Chat helpers ─────────────────────────────────────────────────
 function newChat() {
-  sessionId = null; sessionDisp.textContent = '—';
-  messagesInner.innerHTML = ''; messagesInner.appendChild(emptyState);
-  emptyState.style.display = 'flex'; inputBox.value = ''; autoResize(inputBox);
+  sessionId = null;
+  sessionDisp.textContent = '—';
+  messagesInner.innerHTML = '';
+  messagesInner.appendChild(emptyState);
+  emptyState.style.display = 'flex';
+  inputBox.value = '';
+  autoResize(inputBox);
 }
 
-function addToHistory(title, sid) {
-  history = history.filter(h => h.sessionId !== sid);
-  history.unshift({ title: title.slice(0,40), sessionId: sid });
-  if (history.length > 20) history.pop();
-  renderHistory();
-}
-function renderHistory() {
-  historyList.innerHTML = '';
-  history.forEach(h => {
-    const el = document.createElement('div');
-    el.className = 'history-item' + (h.sessionId === sessionId ? ' active' : '');
-    el.innerHTML = `<svg class="history-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg><div class="history-item-text">${escHtml(h.title)}</div>`;
-    el.onclick = () => { sessionId = h.sessionId; sessionDisp.textContent = sid6(h.sessionId); renderHistory(); };
-    historyList.appendChild(el);
-  });
-}
+
 
 const escHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 const sid6 = s => s ? s.slice(-6) : '—';
@@ -665,10 +592,19 @@ function renderStructured(d) {
 }
 function renderTable(d) {
   const cols=d.columns||[],rows=d.rows||[],title=d.title||'',footer=d.footer||'';
+  const morePagesIncoming = d.__more_pages__;
+  const tableId = morePagesIncoming ? 'id="liveTable"' : '';
   const ths=cols.map(c=>`<th>${escHtml(c)}</th>`).join('');
   const trs=rows.map(r=>`<tr>${r.map(c=>`<td>${styleCell(String(c))}</td>`).join('')}</tr>`).join('');
-  const table=`<div class="table-scroll"><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
-  return `${title?`<h3>${escHtml(title)}</h3>`:''}${table}${footer?`<p style="margin-top:6px;font-size:11px;color:var(--text-3);font-family:var(--font-mono)">${escHtml(footer)}</p>`:''}`;
+  const table=`<div class="table-scroll"><table ${tableId}><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
+  // If more pages are coming, show a live loading footer
+  const footerHtml = morePagesIncoming
+    ? `<div id="liveTableFooter" class="table-footer-live" style="margin-top:6px">
+        <span class="table-row-count" style="font-size:11px;font-family:var(--font-mono);color:var(--text-3)">${escHtml(footer||`${rows.length} records loaded`)}</span>
+        <span class="table-loading-pill"><span class="table-loading-dot"></span><span class="table-loading-dot"></span><span class="table-loading-dot"></span>loading more</span>
+       </div>`
+    : footer ? `<p style="margin-top:6px;font-size:11px;color:var(--text-3);font-family:var(--font-mono)">${escHtml(footer)}</p>` : '';
+  return `${title?`<h3>${escHtml(title)}</h3>`:''}${table}${footerHtml}`;
 }
 function styleCell(val) {
   // Collapse newlines/multiline values into a single line
@@ -744,8 +680,9 @@ async function sendMessage() {
   const text = inputBox.value.trim();
   if (!text||isStreaming) return;
   inputBox.value=''; autoResize(inputBox); setLoading(true);
+
+
   appendUserMsg(text);
-  if (history.length===0||history[0]?.sessionId!==sessionId) addToHistory(text, sessionId||'new');
   appendTyping();
   try { await streamChat(text); }
   catch(err) { replaceBotMsg({type:'error',reply:'Network error: '+err.message},[],0); showToast('Connection failed. Is the server running?'); }
@@ -784,7 +721,8 @@ async function streamChat(message) {
       }
       else if (evt.type==='done') {
         const elapsed=Date.now()-t0;
-        if (evt.session_id) { sessionId=evt.session_id; sessionDisp.textContent=sid6(sessionId); addToHistory(message,sessionId); renderHistory(); }
+        if (evt.session_id) { sessionId=evt.session_id; sessionDisp.textContent=sid6(sessionId); // Bind session ID to active thread on first response
+}
         const fakeResult={type:'reply',structured:evt.structured,reply:streamText};
         if (streamDiv) {
           const bubble=streamDiv.querySelector('.msg-bubble');
@@ -796,6 +734,49 @@ async function streamChat(message) {
           if(meta)meta.innerHTML=`<span>${time}</span><span class="elapsed">${elapsed}ms</span>${tools?`<div class="msg-tools">${tools}</div>`:''}`;
         }
         scrollBottom();
+      }
+      else if (evt.type==='table_append') {
+        // New page of records arrived — append rows to the live table
+        const tbl = document.querySelector('#liveTable');
+        if (tbl) {
+          const tbody = tbl.querySelector('tbody');
+          // If columns not yet set, use first append's columns as headers
+          const theadCells = tbl.querySelectorAll('thead th');
+          const cols = evt.columns || [];
+          if (theadCells.length === 0 && cols.length) {
+            const tr = document.createElement('tr');
+            cols.forEach(c => { const th = document.createElement('th'); th.textContent = c; tr.appendChild(th); });
+            tbl.querySelector('thead').appendChild(tr);
+          }
+          (evt.rows || []).forEach(row => {
+            const tr = document.createElement('tr');
+            tr.className = 'row-new';
+            row.forEach(cell => {
+              const td = document.createElement('td');
+              td.innerHTML = styleCell(String(cell));
+              tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+            setTimeout(() => tr.classList.remove('row-new'), 500);
+          });
+          // Update the footer counter
+          const footer = document.getElementById('liveTableFooter');
+          if (footer) {
+            const pill = footer.querySelector('.table-loading-pill');
+            const count = footer.querySelector('.table-row-count');
+            if (count) count.textContent = `${evt.total_so_far} records loaded`;
+            if (pill && !evt.has_more) pill.style.display = 'none';
+          }
+        }
+        scrollBottom();
+      }
+      else if (evt.type==='table_complete') {
+        const footer = document.getElementById('liveTableFooter');
+        if (footer) {
+          footer.querySelector('.table-loading-pill')?.remove();
+          const count = footer.querySelector('.table-row-count');
+          if (count) count.textContent = `Showing all ${evt.total} records`;
+        }
       }
       else if (evt.type==='confirm') {
         if(evt.session_id){sessionId=evt.session_id;sessionDisp.textContent=sid6(sessionId);}
@@ -814,11 +795,3 @@ document.getElementById('mcpUrlInput').focus();
 </script>
 </body>
 </html>
-
-
-
-
-
-
-
-
