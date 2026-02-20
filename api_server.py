@@ -35,21 +35,23 @@ except ImportError:
 
 
 def _is_sse_url(url: str) -> bool:
-    """
-    Zoho MCP uses SSE transport. Detect it by URL patterns:
-      - contains /sse, /events, /message, or ends with a query key param
-      - streamable HTTP URLs typically end with /mcp or /rpc
-    If unsure, default to SSE — it's the older and more widely deployed transport.
-    """
-    u = url.lower()
-    # Explicit SSE indicators
-    if any(seg in u for seg in ("/sse", "/events", "/message?", "?key=", "&key=")):
-        return True
-    # Streamable HTTP indicators
-    if any(u.rstrip("/").endswith(seg) for seg in ("/mcp", "/rpc", "/jsonrpc")):
+    u = (url or "").lower().strip()
+
+    # If the URL explicitly points to the "message" endpoint, it is NOT SSE.
+    # It's typically the RPC/message endpoint (POST/HTTP), so use streamable HTTP.
+    if "/mcp/message" in u:
         return False
-    # Default: SSE (Zoho and most hosted MCP servers still use it)
-    return True
+
+    # Explicit SSE endpoints (GET text/event-stream) usually look like these:
+    if any(seg in u for seg in ("/sse", "/events", "/event-stream")):
+        return True
+
+    # If URL looks like a base MCP endpoint, prefer streamable HTTP
+    if u.rstrip("/").endswith(("/mcp", "/rpc", "/jsonrpc")):
+        return False
+
+    # Default: streamable HTTP (safer than guessing SSE)
+    return False
 
 from zoho_agent import (
     AgentState,
@@ -172,11 +174,7 @@ async def create_agent_session(
 
     if use_sse:
         # SSE transport — used by Zoho MCP and most hosted servers
-        http_client = httpx.AsyncClient(
-            headers=headers,
-            timeout=httpx.Timeout(TOOL_TIMEOUT + 10),
-        )
-        await http_client.__aenter__()
+       
 
         stream_cm = sse_client(mcp_url, headers=headers)
         read, write = await stream_cm.__aenter__()
@@ -1041,4 +1039,5 @@ BASE_DIR = Path(__file__).resolve().parent
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return FileResponse(BASE_DIR / "favicon.ico", media_type="image/x-icon")
+
 
