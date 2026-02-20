@@ -23,6 +23,7 @@ from google.genai import types as gtypes
 from mcp import ClientSession
 from pathlib import Path
 from fastapi.responses import FileResponse
+
 try:
     from mcp.client.streamable_http import streamable_http_client
 except ImportError:
@@ -33,11 +34,15 @@ from zoho_agent import (
     AuditLog,
     AUDIT_LOG_PATH,
     GEMINI_TIMEOUT,
+    MAX_AUTOPAGINATE_PAGES,
     MAX_REPLAN_ATTEMPTS,
     MODEL,
+    PLANNER_MODEL,
     SUMMARIZE_SYSTEM,
     TOOL_TIMEOUT,
     _estimate_tokens,
+    _extract_records,
+    _has_more_pages,
     _safe_result_str,
     _stream_collect_json,
     add_memory,
@@ -275,6 +280,125 @@ async def api_summarize(
         return json.loads(cleaned)
     except Exception:
         return {"format": "status", "ok": True, "headline": cleaned or "Done.", "detail": ""}
+
+
+def _count_records(result: Any) -> int:
+    """Count total records in the primary list of a Zoho result."""
+    _, records = _extract_records(result) if isinstance(result, dict) else ("", [])
+    return len(records)
+
+
+def _records_to_rows(records: list) -> dict:
+    """Convert a list of Zoho record dicts into {columns, rows} for SSE emission."""
+    PREFERRED = ["invoice_number", "bill_number", "contact_name", "customer_name",
+                 "vendor_name", "date", "due_date", "total", "balance", "status",
+                 "payment_expected_date", "due_days"]
+    SKIP = {"organization_id", "created_time", "last_modified_time",
+            "template_id", "color_code", "zcrm_potential_id"}
+
+    col_freq: dict[str, int] = {}
+    for rec in records[:50]:
+        if isinstance(rec, dict):
+            for k in rec:
+                col_freq[k] = col_freq.get(k, 0) + 1
+
+    cols = [c for c in PREFERRED if col_freq.get(c, 0) > 0]
+    if not cols:
+        cols = [c for c, _ in sorted(col_freq.items(), key=lambda x: -x[1])
+                if c not in SKIP][:8]
+
+    rows = []
+    for rec in records:
+        if isinstance(rec, dict):
+            rows.append([str(rec.get(c, "")) for c in cols])
+
+    return {
+        "columns": [c.replace("_", " ").title() for c in cols],
+        "rows":    rows,
+    }
+
+
+def _fast_fallback_summary(result: Any, tool_name: str) -> str:
+    """
+    Pure-Python fallback summary when Gemini times out on a large result.
+    Extracts the biggest record list, computes totals/counts, returns
+    structured JSON matching the summarizer output format.
+    """
+    import json as _json
+
+    # Find the largest list inside the result
+    records: list = []
+    if isinstance(result, dict):
+        for k, v in result.items():
+            if isinstance(v, list) and len(v) > len(records):
+                records = v
+
+    if not records:
+        return _json.dumps({
+            "format": "status", "ok": True,
+            "headline": f"{tool_name} completed — {len(records)} records returned.",
+        })
+
+    count = len(records)
+
+    # Try to find amount/balance fields and sum them
+    AMOUNT_FIELDS = ("balance", "total", "amount", "balance_due",
+                     "outstanding_receivable_amount", "outstanding_payable_amount")
+    totals: dict[str, float] = {}
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        for field in AMOUNT_FIELDS:
+            if field in rec:
+                try:
+                    totals[field] = totals.get(field, 0.0) + float(rec[field])
+                except (TypeError, ValueError):
+                    pass
+
+    # Build headline
+    primary_field = next((f for f in AMOUNT_FIELDS if f in totals), None)
+    if primary_field:
+        total_val = totals[primary_field]
+        headline  = f"{count} records · Total {primary_field.replace('_',' ')}: ₹{total_val:,.2f}"
+    else:
+        headline = f"{count} records returned by {tool_name}"
+
+    # Build a slim table from the first 100 records
+    # Identify columns present in most records
+    col_freq: dict[str, int] = {}
+    for rec in records[:100]:
+        if isinstance(rec, dict):
+            for k in rec:
+                col_freq[k] = col_freq.get(k, 0) + 1
+
+    # Prefer useful display columns, skip internal IDs and noise
+    PREFERRED = ["invoice_number", "bill_number", "contact_name", "customer_name",
+                 "vendor_name", "date", "due_date", "total", "balance", "status",
+                 "payment_expected_date", "due_days"]
+    SKIP      = {"organization_id", "created_time", "last_modified_time",
+                 "template_id", "color_code", "zcrm_potential_id"}
+
+    cols = [c for c in PREFERRED if col_freq.get(c, 0) > 0]
+    if not cols:
+        cols = [c for c in sorted(col_freq, key=lambda k: -col_freq[k])
+                if c not in SKIP][:8]
+
+    rows = []
+    for rec in records[:100]:
+        if isinstance(rec, dict):
+            rows.append([str(rec.get(c, "")) for c in cols])
+
+    footer = f"Showing {min(count,100)} of {count} records"
+    if primary_field:
+        footer += f" · Total {primary_field.replace('_',' ')}: ₹{totals[primary_field]:,.2f}"
+
+    return _json.dumps({
+        "format":  "table",
+        "title":   tool_name.replace("ZohoBooks_", "").replace("_", " ").title(),
+        "columns": [c.replace("_", " ").title() for c in cols],
+        "rows":    rows,
+        "footer":  footer,
+    })
 
 
 def structured_to_markdown(data: dict) -> str:
@@ -624,70 +748,132 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                            "session_id": sess.session_id})
                 return
 
-            last_step  = steps[-1]
-            last_tool  = last_step.get("tool", "")
-            user_q     = last_step.get("note", "")
-            result_str = _safe_result_str(last_result)
-            prompt     = (
-                f"USER_QUESTION: {user_q or '(not specified — use best judgement on format)'}\n"
-                f"TOOL: {last_tool}\n"
-                f"ARGS: {json.dumps(last_step.get('args', {}), default=str)}\n"
-                f"RESULT: {result_str}"
-            )
-            # Scale timeout: large payloads need more time to process
-            stream_timeout = max(GEMINI_TIMEOUT, min(180.0, len(result_str) / 2000))
-            full_json = ""
+            last_step = steps[-1]
+            last_tool = last_step.get("tool", "")
+            user_q    = last_step.get("note", "")
 
-            async def _collect_stream() -> str:
+            # ── Progressive pagination ─────────────────────────────────────
+            # If execute_step flagged that more pages exist, we:
+            # 1. Summarise page 1 immediately and emit it to the client
+            # 2. Start a background loop fetching remaining pages
+            # 3. Each new page emits table_append SSE events so the frontend
+            #    can extend the live table while the user is reading
+            paginate_meta = None
+            if isinstance(last_result, dict):
+                paginate_meta = last_result.pop("__paginate__", None)
+
+            # Helper: run Gemini summarizer and yield structured + tokens
+            async def _summarise_and_emit(result: Any, is_page1: bool) -> Optional[dict]:
                 nonlocal full_json
-                async for chunk in await a.gemini.aio.models.generate_content_stream(
-                    model=MODEL,
-                    contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=prompt)])],
-                    config=gtypes.GenerateContentConfig(
-                        system_instruction=SUMMARIZE_SYSTEM,
-                        temperature=0.1,
-                        response_mime_type="application/json",
-                        max_output_tokens=65536,
-                    ),
-                ):
-                    full_json += chunk.text or ""
-                return full_json
+                result_str   = _safe_result_str(result)
+                prompt_inner = (
+                    f"USER_QUESTION: {user_q or '(not specified — use best judgement on format)'}\n"
+                    f"TOOL: {last_tool}\n"
+                    f"ARGS: {json.dumps(last_step.get('args', {}), default=str)}\n"
+                    f"RESULT: {result_str}"
+                )
+                timeout_inner = max(GEMINI_TIMEOUT, min(180.0, len(result_str) / 2000))
+                buf = ""
+
+                async def _collect() -> None:
+                    nonlocal buf
+                    async for chunk in await a.gemini.aio.models.generate_content_stream(
+                        model=MODEL,
+                        contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=prompt_inner)])],
+                        config=gtypes.GenerateContentConfig(
+                            system_instruction=SUMMARIZE_SYSTEM,
+                            temperature=0.1,
+                            response_mime_type="application/json",
+                            max_output_tokens=65536,
+                        ),
+                    ):
+                        buf += chunk.text or ""
+
+                try:
+                    await asyncio.wait_for(_collect(), timeout=timeout_inner)
+                except asyncio.TimeoutError:
+                    log.warning("summarize_timeout", extra={"cid": cid, "tool": last_tool})
+                    if not (buf.strip().endswith("}") or buf.strip().endswith("]")):
+                        buf = _fast_fallback_summary(result, last_tool)
+
+                cleaned_inner = re.sub(r"^```(?:json)?\s*|\s*```$", "", buf.strip(), flags=re.MULTILINE).strip()
+                try:
+                    structured_inner = json.loads(cleaned_inner)
+                except Exception:
+                    structured_inner = {"format": "status", "ok": True, "headline": cleaned_inner or "Done."}
+
+                if is_page1 and paginate_meta:
+                    # Mark this as the first page of a progressive table —
+                    # the frontend will show a loading indicator
+                    structured_inner["__more_pages__"] = True
+
+                return structured_inner
 
             t_summ_start = time.monotonic()
-            try:
-                await asyncio.wait_for(_collect_stream(), timeout=stream_timeout)
-            except asyncio.TimeoutError:
-                log.warning("summarize_timeout", extra={
-                    "cid": cid, "tool": last_tool,
-                    "collected_chars": len(full_json),
-                    "timeout": stream_timeout,
-                })
-                if not (full_json.strip().endswith("}") or full_json.strip().endswith("]")):
-                    full_json = json.dumps({
-                        "format":   "status", "ok": True,
-                        "headline": f"{last_tool} completed (response timed out — try asking for a smaller set).",
-                    })
+            full_json    = ""
+            structured   = await _summarise_and_emit(last_result, is_page1=bool(paginate_meta))
+            log.info("summarize_latency", extra={"cid": cid, "ms": int((time.monotonic()-t_summ_start)*1000)})
 
-            log.info("summarize_latency", extra={"cid": cid, "ms": int((time.monotonic()-t_summ_start)*1000), "chars": len(full_json)})
-            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", full_json.strip(), flags=re.MULTILINE).strip()
-            try:
-                structured = json.loads(cleaned)
-            except Exception:
-                structured = {"format": "status", "ok": True, "headline": cleaned or "Done."}
-
+            # Emit page 1 tokens immediately
             reply_md = structured_to_markdown(structured)
-            # Emit in chunks of ~80 chars for a smooth but fast stream
-            # Word-by-word with asyncio.sleep(0) per word is far too slow
             CHUNK = 80
             for i in range(0, len(reply_md), CHUNK):
                 yield sse({"type": "token", "token": reply_md[i:i + CHUNK]})
-                if i % (CHUNK * 8) == 0:          # yield control every ~640 chars
+                if i % (CHUNK * 8) == 0:
                     await asyncio.sleep(0)
 
             sess.state.clear_workflow()
             sess.touch()
             yield sse({"type": "done", "structured": structured,
                        "session_id": sess.session_id, "tools_used": tools_used})
+
+            # ── Background pagination ──────────────────────────────────────
+            # After sending done, keep the SSE connection open and stream
+            # additional pages silently. Each page emits table_append.
+            if paginate_meta:
+                pg_tool = paginate_meta["tool"]
+                pg_args = dict(paginate_meta["args"])
+                page    = 2
+                total_fetched = _count_records(last_result)
+
+                while page <= MAX_AUTOPAGINATE_PAGES:
+                    pg_args["page"] = page
+                    log.info("bg_paginate_fetch", extra={"tool": pg_tool, "page": page, "cid": cid})
+                    try:
+                        raw_page = await asyncio.wait_for(
+                            sess.mcp_session.call_tool(pg_tool, pg_args),
+                            timeout=TOOL_TIMEOUT,
+                        )
+                        page_result = raw_page.model_dump() if hasattr(raw_page, "model_dump") else raw_page
+                    except Exception as exc:
+                        log.warning("bg_paginate_error", extra={"page": page, "error": str(exc), "cid": cid})
+                        break
+
+                    _, page_records = _extract_records(page_result)
+                    if not page_records:
+                        break
+
+                    total_fetched += len(page_records)
+                    has_more = _has_more_pages(page_result)
+
+                    # Build slim rows using the same column logic as fast_fallback
+                    rows = _records_to_rows(page_records)
+                    yield sse({
+                        "type":          "table_append",
+                        "rows":          rows["rows"],
+                        "columns":       rows["columns"],
+                        "total_so_far":  total_fetched,
+                        "has_more":      has_more,
+                        "page":          page,
+                    })
+                    await asyncio.sleep(0)
+
+                    if not has_more:
+                        break
+                    page += 1
+
+                # Signal that all pages have been fetched
+                yield sse({"type": "table_complete", "total": total_fetched})
 
         except asyncio.CancelledError:
             pass
@@ -740,4 +926,5 @@ BASE_DIR = Path(__file__).resolve().parent
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return FileResponse(BASE_DIR / "favicon.ico", media_type="image/x-icon")
+
 
