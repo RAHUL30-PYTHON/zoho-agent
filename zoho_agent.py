@@ -259,6 +259,75 @@ class AgentState:
 # ---------------------------------------------------------------------------
 # Schema helpers
 # ---------------------------------------------------------------------------
+def _slim_memory_for_planner(memory_entries: list) -> list:
+    """
+    Strips or summarises large 'result' values from memory entries before
+    sending them to the Gemini planner.
+
+    The planner needs to know:
+      - Which tools were called
+      - What arguments were used
+      - Whether the call succeeded (errors)
+      - Key entity IDs/names from the result (first 3 records max)
+
+    The planner does NOT need the full 1700-row result payload.
+    Sending it causes the planner prompt to exceed Gemini's token budget,
+    producing the "ran into a problem" error after the 2nd large query.
+    """
+    slimmed = []
+    for entry in memory_entries:
+        if not isinstance(entry, dict):
+            slimmed.append(entry)
+            continue
+
+        e = dict(entry)  # shallow copy — don't mutate original
+
+        if "result" in e and isinstance(e["result"], dict):
+            result = e["result"]
+
+            # Find the largest list in the result (the records array)
+            best_key, best_arr = "", []
+            for k, v in result.items():
+                if isinstance(v, list) and len(v) > len(best_arr):
+                    best_key, best_arr = k, v
+
+            if len(best_arr) > 3:
+                # Replace full result with a compact summary
+                # Keep only the first 3 records so the planner knows the shape
+                sample = best_arr[:3]
+                # Strip noisy fields from samples too
+                clean_sample = []
+                for rec in sample:
+                    if isinstance(rec, dict):
+                        clean_sample.append({
+                            k: v for k, v in rec.items()
+                            if k in (
+                                "invoice_number", "bill_number", "contact_name",
+                                "customer_name", "vendor_name", "invoice_id",
+                                "bill_id", "contact_id", "item_id", "name",
+                                "total", "balance", "status", "date", "due_date",
+                                "payment_number", "amount", "email",
+                            )
+                        })
+                    else:
+                        clean_sample.append(rec)
+
+                e["result"] = {
+                    "__slimmed__":   True,
+                    "record_count":  len(best_arr),
+                    "record_key":    best_key,
+                    "sample_records": clean_sample,
+                    # Preserve page_context so planner knows pagination state
+                    **({"page_context": result["page_context"]}
+                       if "page_context" in result else {}),
+                }
+            # else: small result (<= 3 records) — keep as-is
+
+        slimmed.append(e)
+    return slimmed
+
+
+
 def compact_schema(schema: dict, max_props: int = MAX_TOOL_PROPS) -> dict:
     if not schema:
         return {}
@@ -378,12 +447,31 @@ async def summarize_memory_async(
 
 
 def add_memory(
-    memory: list[dict],
+    memory: list,
     entry: dict,
-    gemini_client: Optional[Any] = None,
+    gemini_client=None,
     cid: str = "",
-) -> Optional[asyncio.Task]:
+):
     memory.append(entry)
+
+    # ── NEW: trim large results stored in memory IMMEDIATELY ──────
+    # The full result is only needed during summarization (which happens
+    # synchronously before add_memory is called). After that, we slim it
+    # down so it doesn't balloon the planner payload on future turns.
+    last = memory[-1]
+    if isinstance(last, dict) and "result" in last and isinstance(last["result"], dict):
+        result = last["result"]
+        best_key, best_arr = "", []
+        for k, v in result.items():
+            if isinstance(v, list) and len(v) > len(best_arr):
+                best_key, best_arr = k, v
+        if len(best_arr) > 5:
+            last["result"] = {
+                "__trimmed__":  True,
+                "record_count": len(best_arr),
+                "record_key":   best_key,
+            }
+    # ── END NEW ──────────────────────────────────────────────────
 
     total_tokens = sum(_estimate_tokens(m) for m in memory)
     over_entries = len(memory) > MAX_MEMORY_ENTRIES
@@ -516,16 +604,16 @@ def _slim_toolbox(toolbox: dict[str, ToolMeta], user_msg: str, memory: list[dict
 
 
 def _build_planner_payload(
-    toolbox: dict[str, ToolMeta],
-    state: AgentState,
-    memory: list[dict],
+    toolbox: dict,   # dict[str, ToolMeta]
+    state,           # AgentState
+    memory: list,
     user_msg: str,
 ) -> str:
     return json.dumps(
         {
             "TOOLBOX": _slim_toolbox(toolbox, user_msg, memory),
             "STATE":   state.to_dict(),
-            "MEMORY":  memory[-12:],
+            "MEMORY":  _slim_memory_for_planner(memory[-12:]),  # <-- FIX
             "USER":    user_msg,
         },
         ensure_ascii=False,
@@ -1447,3 +1535,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
