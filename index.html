@@ -139,11 +139,7 @@
   .brand-icon svg { width: 18px; height: 18px; color: #0a0c0f; }
   .brand-name { font-size: 15px; font-weight: 700; letter-spacing: -.01em; color: var(--text); }
   .brand-tag  { font-size: 10px; font-family: var(--font-mono); color: var(--accent); letter-spacing: .08em; text-transform: uppercase; margin-top: 1px; }
-  
-  .new-chat-btn { margin: 16px 16px 8px; padding: 10px 14px; background: var(--accent-dim); border: 1px solid var(--accent-glow); border-radius: var(--radius-sm); color: var(--accent); font-family: var(--font-sans); font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; transition: var(--transition); letter-spacing: .02em; }
-  .new-chat-btn:hover { background: var(--accent); color: #0a0c0f; border-color: var(--accent); }
-  .new-chat-btn svg { width: 14px; height: 14px; }
-  
+
   .sidebar-section { padding: 8px 16px 4px; font-size: 10px; font-family: var(--font-mono); color: var(--text-3); letter-spacing: .1em; text-transform: uppercase; }
   .history-list { flex: 1; overflow-y: auto; padding: 4px 10px 16px; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
   .history-item { padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; display: flex; align-items: flex-start; gap: 8px; transition: var(--transition); }
@@ -152,7 +148,7 @@
   .history-item-icon { width: 18px; height: 18px; flex-shrink: 0; margin-top: 1px; color: var(--text-3); }
   .history-item-text { font-size: 12.5px; color: var(--text-2); line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; }
   .history-item.active .history-item-text { color: var(--text); }
-  
+
   .sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
   .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); flex-shrink: 0; animation: pulse-dot 2.4s ease-in-out infinite; }
   @keyframes pulse-dot { 0%,100% { opacity:1; box-shadow:0 0 8px var(--accent); } 50% { opacity:.5; box-shadow:0 0 3px var(--accent); } }
@@ -180,9 +176,6 @@
   .empty-glyph svg { width: 32px; height: 32px; }
   .empty-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -.03em; }
   .empty-sub { font-size: 13.5px; color: var(--text-2); max-width: 380px; line-height: 1.7; font-family: var(--font-mono); }
-  .suggestions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; }
-  .suggestion-chip { padding: 8px 14px; background: var(--surface); border: 1px solid var(--border-hi); border-radius: 100px; font-size: 12.5px; color: var(--text-2); cursor: pointer; transition: var(--transition); font-family: var(--font-mono); }
-  .suggestion-chip:hover { background: var(--surface2); color: var(--text); border-color: var(--accent-glow); }
 
   .msg { display: flex; gap: 12px; animation: fade-up .25s ease both; }
   @keyframes fade-up { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
@@ -205,6 +198,9 @@
   .msg-bubble strong { color: var(--text); font-weight: 600; }
   .msg-bubble em { color: var(--text-2); font-style: italic; }
   .msg-bubble code { font-family: var(--font-mono); font-size: 12px; background: var(--surface2); border: 1px solid var(--border-hi); padding: 1px 5px; border-radius: 4px; color: var(--accent); }
+
+  /* ── Paginated Table ─────────────────────────────────────────── */
+  .paged-table-wrapper { position: relative; }
   .table-scroll { overflow-x: auto; overflow-y: visible; margin: 6px -4px; border-radius: var(--radius-sm); scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
   .table-scroll::-webkit-scrollbar { height: 4px; }
   .table-scroll::-webkit-scrollbar-track { background: transparent; }
@@ -215,14 +211,48 @@
   .msg-bubble td { padding: 5px 10px; color: var(--text-2); border-bottom: 1px solid var(--border); white-space: nowrap; }
   .msg-bubble tr:last-child td { border-bottom: none; }
   .msg-bubble tr:hover td { background: var(--surface2); }
-  .table-footer-live { display: flex; align-items: center; gap: 8px; }
+
+  /* ── Pagination Controls ─────────────────────────────────────── */
+  .pagination-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 4px 4px;
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
+    gap: 12px;
+  }
+  .pagination-info {
+    font-size: 10.5px; font-family: var(--font-mono); color: var(--text-3);
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .pagination-info strong { color: var(--text-2); }
+  .pagination-controls { display: flex; align-items: center; gap: 4px; }
+  .page-btn {
+    height: 26px; min-width: 26px; padding: 0 6px;
+    background: var(--surface2); border: 1px solid var(--border-hi);
+    border-radius: 5px; color: var(--text-2);
+    font-family: var(--font-mono); font-size: 11px;
+    cursor: pointer; transition: var(--transition);
+    display: flex; align-items: center; justify-content: center; gap: 3px;
+  }
+  .page-btn:hover:not(:disabled) { background: var(--border-hi); color: var(--text); border-color: var(--accent-glow); }
+  .page-btn:disabled { opacity: .35; cursor: not-allowed; }
+  .page-btn.active { background: var(--accent-dim); border-color: var(--accent-glow); color: var(--accent); }
+  .page-btn svg { width: 11px; height: 11px; }
+  .page-dots { font-size: 11px; font-family: var(--font-mono); color: var(--text-3); padding: 0 2px; }
+
+  /* Loading indicator while streaming more pages */
   .table-loading-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-family: var(--font-mono); color: var(--accent); background: var(--accent-dim); border: 1px solid var(--accent-glow); border-radius: 100px; padding: 2px 8px; }
   .table-loading-dot { width: 5px; height: 5px; background: var(--accent); border-radius: 50%; animation: typing-bounce .9s ease-in-out infinite; }
   .table-loading-dot:nth-child(1){animation-delay:0s}
   .table-loading-dot:nth-child(2){animation-delay:.15s}
   .table-loading-dot:nth-child(3){animation-delay:.3s}
+
+  .table-footer-live { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .table-row-count { font-size: 11px; font-family: var(--font-mono); color: var(--text-3); }
+
   @keyframes row-in { from { opacity:0; background: var(--accent-dim); } to { opacity:1; background: transparent; } }
   .msg-bubble tr.row-new td { animation: row-in .4s ease both; }
+
   .answer-card { background: linear-gradient(135deg, #00e5b010, #00e5b005); border: 1px solid #00e5b040; border-radius: var(--radius-sm); padding: 16px 18px; margin: 4px 0; }
   .answer-question { font-size: 11px; font-family: var(--font-mono); color: var(--text-3); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 8px; }
   .answer-value { font-size: 20px; font-weight: 700; color: var(--accent); font-family: var(--font-sans); letter-spacing: -.02em; line-height: 1.3; margin-bottom: 10px; }
@@ -290,11 +320,11 @@
   .toast.show { display: block; animation: toast-in .2s ease both; }
   @keyframes toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
   @media (max-width: 760px) {
-  .shell { grid-template-columns: 1fr; }
-  .sidebar { display: none; }
-  .messages-inner,.input-wrapper,.input-hint { padding: 0 16px; }
-  .header { padding: 0 16px; }
-}
+    .shell { grid-template-columns: 1fr; }
+    .sidebar { display: none; }
+    .messages-inner,.input-wrapper,.input-hint { padding: 0 16px; }
+    .header { padding: 0 16px; }
+  }
 </style>
 </head>
 <body>
@@ -302,7 +332,6 @@
 <!-- ── Setup Modal ────────────────────────────────────────────── -->
 <div class="setup-overlay" id="setupOverlay">
   <div class="setup-card">
-
     <div class="setup-brand">
       <div class="setup-brand-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
@@ -314,7 +343,6 @@
         <div class="setup-brand-sub" id="setupSubtitle">Connect your MCP server</div>
       </div>
     </div>
-
     <div class="setup-steps">
       <div class="setup-step-pill active" id="pill1">
         <div class="setup-step-num" id="num1">1</div>MCP Server
@@ -324,9 +352,7 @@
         <div class="setup-step-num" id="num2">2</div>Organisation
       </div>
     </div>
-
     <div class="setup-divider"></div>
-
     <div class="setup-panel" id="panel1">
       <div class="setup-field">
         <label class="setup-label" for="mcpUrlInput">MCP Server URL</label>
@@ -344,7 +370,6 @@
       </button>
       <div class="setup-hint">The URL is stored for this browser session only<br>and sent with every request to the API.</div>
     </div>
-
     <div class="setup-panel hidden" id="panel2">
       <div class="setup-field">
         <label class="setup-label" for="orgIdInput">Zoho Organisation ID</label>
@@ -363,7 +388,6 @@
       </button>
       <div class="setup-hint">Your organisation ID is sent with every request<br>and only stored in this browser session.</div>
     </div>
-
   </div>
 </div>
 
@@ -383,10 +407,6 @@
         </div>
       </div>
     </div>
-    <!-- <button class="new-chat-btn" onclick="newChat()">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
-      New conversation
-    </button> -->
     <div class="sidebar-section">In conversation</div>
     <div class="history-list" id="historyList"></div>
     <div class="sidebar-footer">
@@ -458,12 +478,22 @@
 
 <script>
 const API_BASE = window.location.origin;
+const PAGE_SIZE = 25; // rows per frontend page
 
 // ── State ────────────────────────────────────────────────────────
-let mcpUrl      = null;
-let orgId       = null;
-let sessionId   = null;
-let isStreaming  = false;
+let mcpUrl     = null;
+let orgId      = null;
+let sessionId  = null;
+let isStreaming = false;
+
+// ── Per-table pagination state ────────────────────────────────────
+// Key: unique tableId string, Value: { allRows, cols, currentPage, isLoading, bubble }
+const tableStates = new Map();
+
+// ── Live-table tracking (for SSE streaming) ───────────────────────
+// Keyed by a unique ID assigned at table creation, NOT the DOM id="liveTable"
+// This fixes the second-query bug: we track by JS object reference, not DOM id
+let activeLiveTableId = null; // currently streaming table's key in tableStates
 
 // ── DOM ──────────────────────────────────────────────────────────
 const messagesEl    = document.getElementById('messagesEl');
@@ -499,16 +529,12 @@ async function connectMcp() {
   const input = document.getElementById('mcpUrlInput');
   const raw   = input.value.trim();
   if (!raw) { showErr(1, 'MCP URL is required.'); input.focus(); return; }
-
   let url = raw;
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    url = 'https://' + url;
-  }
+  if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://' + url;
   try { new URL(url); }
   catch { showErr(1, 'Please enter a valid URL (e.g. https://your-server.com/mcp).'); input.focus(); return; }
 
   btnLoading(1, true, 'Connecting…');
-
   try {
     const ctrl = new AbortController();
     const tid  = setTimeout(() => ctrl.abort(), 6000);
@@ -519,8 +545,7 @@ async function connectMcp() {
       document.getElementById('modelBadge').textContent = d.model || 'gemini';
     }
   } catch {
-    const el = connStatus;
-    if (el) { el.textContent = 'Server unreachable'; el.style.color = 'var(--amber)'; }
+    if (connStatus) { connStatus.textContent = 'Server unreachable'; connStatus.style.color = 'var(--amber)'; }
   }
 
   mcpUrl = url;
@@ -543,17 +568,14 @@ function submitOrg() {
   const val   = input.value.trim();
   if (!val) { showErr(2, 'Organisation ID is required.'); input.focus(); return; }
   if (!/^\d{4,}$/.test(val)) { showErr(2, 'Must be a numeric ID (e.g. 60065733225).'); input.focus(); return; }
-
   orgId = val;
   document.getElementById('orgIdDisplay').textContent = orgId;
-
   btnLoading(2, true, 'Starting…');
   setTimeout(() => {
     document.getElementById('setupOverlay').classList.add('hidden');
     document.getElementById('shell').classList.add('visible');
     if (connStatus.textContent !== 'Offline?') {
-      connStatus.textContent = 'Connected';
-      connStatus.style.color = 'var(--accent)';
+      connStatus.textContent = 'Connected'; connStatus.style.color = 'var(--accent)';
     }
     btnLoading(2, false, '');
     inputBox.focus();
@@ -566,18 +588,8 @@ function truncateUrl(url) {
 }
 
 // ── Chat helpers ─────────────────────────────────────────────────
-function newChat() {
-  sessionId = null;
-  sessionDisp.textContent = '—';
-  messagesInner.innerHTML = '';
-  messagesInner.appendChild(emptyState);
-  emptyState.style.display = 'flex';
-  inputBox.value = '';
-  autoResize(inputBox);
-}
-
-const escHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-const sid6 = s => s ? s.slice(-6) : '—';
+const escHtml = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const sid6    = s => s ? s.slice(-6) : '—';
 
 function showToast(msg, d=4000) {
   const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show');
@@ -591,7 +603,6 @@ function autoResize(el) {
 }
 function setLoading(v) { isStreaming = v; sendBtn.disabled = v; inputBox.disabled = v; }
 function handleKey(e) { if (e.key==='Enter'&&!e.shiftKey) { e.preventDefault(); sendMessage(); } }
-function sendSuggestion(el) { inputBox.value = el.textContent; autoResize(inputBox); sendMessage(); }
 function hideEmpty() { if (emptyState.parentNode) emptyState.style.display = 'none'; }
 
 // ── Message rendering ─────────────────────────────────────────────
@@ -608,6 +619,7 @@ function appendTyping() {
   div.innerHTML = `<div class="msg-avatar">Z</div><div class="msg-body"><div class="msg-bubble"><div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div></div></div>`;
   messagesInner.appendChild(div); scrollBottom();
 }
+
 function replaceBotMsg(result, tools, elapsed) {
   const existing = document.getElementById('typingIndicator');
   const time = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
@@ -618,6 +630,7 @@ function replaceBotMsg(result, tools, elapsed) {
   if (existing) existing.replaceWith(div); else messagesInner.appendChild(div);
   renderResult(div.querySelector('.msg-bubble'), result); scrollBottom();
 }
+
 function createStreamingBubble() {
   const existing = document.getElementById('typingIndicator');
   const div = document.createElement('div'); div.className = 'msg bot';
@@ -625,58 +638,232 @@ function createStreamingBubble() {
   if (existing) existing.replaceWith(div); else messagesInner.appendChild(div);
   scrollBottom(); return div;
 }
+
 function renderResult(bubble, result) {
   if (!result) { bubble.innerHTML = '<p>Done.</p>'; return; }
   if (result.type==='confirm') { bubble.innerHTML = renderConfirm(result.confirm_text); return; }
   if (result.type==='error')   { bubble.innerHTML = renderStatusBlock(false, result.reply||'Something went wrong.',''); return; }
   const s = result.structured;
   if (s) {
-    if (s.format==='table') bubble.classList.add('has-table');
-    bubble.innerHTML = renderStructured(s);
+    if (s.format==='table') { bubble.classList.add('has-table'); renderPagedTable(bubble, s); }
+    else bubble.innerHTML = renderStructured(s);
   }
   else if (result.reply) bubble.innerHTML = markdownToHtml(result.reply);
   else bubble.innerHTML = '<p>Done.</p>';
 }
+
+// ── Paginated Table ───────────────────────────────────────────────
+
+function genTableId() {
+  return 'tbl_' + Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * Create a new paginated table in the given bubble from structured data.
+ * Returns the tableId so callers can register it as the live-streaming table.
+ */
+function renderPagedTable(bubble, s, tableId) {
+  tableId = tableId || genTableId();
+  const cols = s.columns || [];
+  const rows = s.rows || [];
+  const title = s.title || '';
+  const footer = s.footer || '';
+  const isLoading = !!s.__more_pages__;
+
+  // Store state
+  tableStates.set(tableId, {
+    allRows: rows.slice(),   // copy — will grow as table_append arrives
+    cols,
+    currentPage: 1,
+    isLoading,
+    bubble,
+    title,
+    footer,
+  });
+
+  bubble.dataset.tableId = tableId;
+  _renderTableDOM(tableId);
+  return tableId;
+}
+
+/** Full DOM re-render for a paginated table (called on page change or new rows) */
+function _renderTableDOM(tableId) {
+  const st = tableStates.get(tableId);
+  if (!st) return;
+
+  const { allRows, cols, currentPage, isLoading, bubble, title, footer } = st;
+  const totalRows  = allRows.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
+  const page       = Math.min(currentPage, totalPages);
+  st.currentPage   = page; // clamp in case rows grew
+
+  const startIdx = (page - 1) * PAGE_SIZE;
+  const pageRows = allRows.slice(startIdx, startIdx + PAGE_SIZE);
+
+  const ths = cols.map(c => `<th>${escHtml(c)}</th>`).join('');
+  const trs = pageRows.map(r =>
+    `<tr>${r.map(c => `<td>${styleCell(String(c))}</td>`).join('')}</tr>`
+  ).join('');
+
+  // Build loading pill or footer text
+  const loadingPill = isLoading
+    ? `<span class="table-loading-pill"><span class="table-loading-dot"></span><span class="table-loading-dot"></span><span class="table-loading-dot"></span>loading more</span>`
+    : '';
+
+  const footerText = isLoading
+    ? `<span class="table-row-count">${totalRows} records loaded so far</span>`
+    : `<span class="table-row-count">${escHtml(footer || `${totalRows} records`)}</span>`;
+
+  bubble.innerHTML = `
+    ${title ? `<h3>${escHtml(title)}</h3>` : ''}
+    <div class="paged-table-wrapper" data-table-id="${tableId}">
+      <div class="table-scroll">
+        <table>
+          <thead><tr>${ths}</tr></thead>
+          <tbody>${trs}</tbody>
+        </table>
+      </div>
+      ${totalPages > 1 ? _buildPaginationBar(tableId, page, totalPages, totalRows, isLoading) : ''}
+      ${(isLoading || footer) ? `<div class="table-footer-live" style="margin-top:6px">${footerText}${loadingPill}</div>` : ''}
+    </div>
+  `;
+}
+
+/** Build the pagination bar HTML */
+function _buildPaginationBar(tableId, currentPage, totalPages, totalRows, isLoading) {
+  const start = (currentPage - 1) * PAGE_SIZE + 1;
+  const end   = Math.min(currentPage * PAGE_SIZE, totalRows);
+
+  // Page number buttons: show window of 5 around current
+  let pageNums = '';
+  const window = 2;
+  for (let p = 1; p <= totalPages; p++) {
+    if (p === 1 || p === totalPages || (p >= currentPage - window && p <= currentPage + window)) {
+      const isActive = p === currentPage ? ' active' : '';
+      pageNums += `<button class="page-btn${isActive}" onclick="gotoPage('${tableId}',${p})">${p}</button>`;
+    } else if (p === currentPage - window - 1 || p === currentPage + window + 1) {
+      pageNums += `<span class="page-dots">…</span>`;
+    }
+  }
+
+  const loadingNote = isLoading ? `<span style="font-size:10px;font-family:var(--font-mono);color:var(--accent);margin-left:4px">↻</span>` : '';
+
+  return `
+    <div class="pagination-bar">
+      <div class="pagination-info">
+        Showing <strong>${start}–${end}</strong> of <strong>${totalRows}${isLoading ? '+' : ''}</strong>${loadingNote}
+      </div>
+      <div class="pagination-controls">
+        <button class="page-btn" onclick="gotoPage('${tableId}',${currentPage-1})" ${currentPage===1?'disabled':''}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        ${pageNums}
+        <button class="page-btn" onclick="gotoPage('${tableId}',${currentPage+1})" ${currentPage>=totalPages?'disabled':''}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+/** Called by pagination button clicks */
+function gotoPage(tableId, page) {
+  const st = tableStates.get(tableId);
+  if (!st) return;
+  const totalPages = Math.ceil(st.allRows.length / PAGE_SIZE);
+  st.currentPage = Math.max(1, Math.min(page, totalPages));
+  _renderTableDOM(tableId);
+  // Scroll the bubble into view smoothly
+  st.bubble.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// ── Live streaming table append (table_append / table_complete) ───
+
+/**
+ * Append rows to the currently-streaming live table.
+ * Uses activeLiveTableId (a JS string key), NOT a DOM id.
+ * This fixes the second-query bug completely.
+ */
+function liveTableAppend(rows, totalSoFar, hasMore) {
+  if (!activeLiveTableId) return;
+  const st = tableStates.get(activeLiveTableId);
+  if (!st) return;
+
+  st.allRows.push(...rows);
+  st.isLoading = hasMore;
+
+  // Only re-render if user is on the last page (so we don't jump their view)
+  const totalPages = Math.max(1, Math.ceil(st.allRows.length / PAGE_SIZE));
+  const isOnLastPage = st.currentPage >= totalPages - 1;
+  if (isOnLastPage) {
+    _renderTableDOM(activeLiveTableId);
+  } else {
+    // Just update the loading indicator and count without re-rendering the table
+    _updateTableFooter(activeLiveTableId);
+  }
+  scrollBottom();
+}
+
+function liveTableComplete(total) {
+  if (!activeLiveTableId) return;
+  const st = tableStates.get(activeLiveTableId);
+  if (st) {
+    st.isLoading = false;
+    st.footer = `Showing all ${total} records`;
+    _renderTableDOM(activeLiveTableId);
+  }
+  activeLiveTableId = null;
+}
+
+/** Lightweight footer/count update without full re-render */
+function _updateTableFooter(tableId) {
+  const st = tableStates.get(tableId);
+  if (!st) return;
+  const wrapper = st.bubble.querySelector('.paged-table-wrapper');
+  if (!wrapper) { _renderTableDOM(tableId); return; }
+  const countEl = wrapper.querySelector('.table-row-count');
+  if (countEl) countEl.textContent = `${st.allRows.length} records loaded so far`;
+  const paginationInfo = wrapper.querySelector('.pagination-info');
+  if (paginationInfo) {
+    const page = st.currentPage;
+    const start = (page - 1) * PAGE_SIZE + 1;
+    const end   = Math.min(page * PAGE_SIZE, st.allRows.length);
+    paginationInfo.innerHTML = `Showing <strong>${start}–${end}</strong> of <strong>${st.allRows.length}+</strong>`;
+  }
+}
+
+// ── Other renderers ───────────────────────────────────────────────
 function renderAnswer(d) {
   const q=d.question||'', a=d.answer||'Done.', bd=d.breakdown||[], note=d.note||'';
   const bdHtml=bd.length?`<div class="answer-breakdown">${bd.map(([l,v])=>`<div class="answer-breakdown-row"><span class="answer-breakdown-label">${escHtml(l)}</span><span class="answer-breakdown-val">${escHtml(String(v))}</span></div>`).join('')}</div>`:'';
   const noteHtml=note?`<div class="answer-note">${escHtml(note)}</div>`:'';
   return `<div class="answer-card">${q?`<div class="answer-question">${escHtml(q)}</div>`:''}<div class="answer-value">${escHtml(a)}</div>${bdHtml}${noteHtml}</div>`;
 }
+
 function renderStructured(d) {
   const f = d.format||'status';
   if (f==='answer') return renderAnswer(d);
-  if (f==='table') return renderTable(d);
-  if (f==='panel') return renderPanel(d);
+  if (f==='panel')  return renderPanel(d);
   return renderStatusBlock(d.ok!==false, d.headline||'Done.', d.detail||'');
 }
-function renderTable(d) {
-  const cols=d.columns||[],rows=d.rows||[],title=d.title||'',footer=d.footer||'';
-  const morePagesIncoming = d.__more_pages__;
 
-  // FIX: Before assigning id="liveTable" to the new table, remove it from any
-  // existing table in the DOM. Without this, after the first paginated query
-  // completes, the old table keeps id="liveTable". When the second query arrives
-  // and creates a new liveTable, there are two elements with the same id.
-  // document.querySelector('#liveTable') returns the FIRST (stale) one, so
-  // table_append rows get appended to the wrong table and the new table appears stuck.
-  if (morePagesIncoming) {
-    const stale = document.getElementById('liveTable');
-    if (stale) stale.removeAttribute('id');
-  }
-
-  const tableId = morePagesIncoming ? 'id="liveTable"' : '';
-  const ths=cols.map(c=>`<th>${escHtml(c)}</th>`).join('');
-  const trs=rows.map(r=>`<tr>${r.map(c=>`<td>${styleCell(String(c))}</td>`).join('')}</tr>`).join('');
-  const table=`<div class="table-scroll"><table ${tableId}><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
-  const footerHtml = morePagesIncoming
-    ? `<div id="liveTableFooter" class="table-footer-live" style="margin-top:6px">
-        <span class="table-row-count" style="font-size:11px;font-family:var(--font-mono);color:var(--text-3)">${escHtml(footer||`${rows.length} records loaded`)}</span>
-        <span class="table-loading-pill"><span class="table-loading-dot"></span><span class="table-loading-dot"></span><span class="table-loading-dot"></span>loading more</span>
-       </div>`
-    : footer ? `<p style="margin-top:6px;font-size:11px;color:var(--text-3);font-family:var(--font-mono)">${escHtml(footer)}</p>` : '';
-  return `${title?`<h3>${escHtml(title)}</h3>`:''}${table}${footerHtml}`;
+function renderPanel(d) {
+  const title=d.title||'Details',fields=d.fields||[],note=d.note||'';
+  const rows=fields.map(([l,v])=>`<div class="detail-row"><div class="detail-label">${escHtml(l)}</div><div class="detail-value">${styleCell(String(v))}</div></div>`).join('');
+  return `<div class="detail-card"><div class="detail-card-title">${escHtml(title)}</div><div class="detail-card-rows">${rows}</div></div>${note?`<p style="margin-top:8px;color:var(--text-3);font-size:12px;font-style:italic">${escHtml(note)}</p>`:''}`;
 }
+
+function renderStatusBlock(ok,headline,detail) {
+  const cls=ok?'ok':'err';
+  const icon=ok?`<svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>`
+               :`<svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>`;
+  return `<div class="status-block ${cls}">${icon}<div><div class="status-headline">${escHtml(headline)}</div>${detail?`<div class="status-detail">${escHtml(detail)}</div>`:''}</div></div>`;
+}
+
+function renderConfirm(text) {
+  return `<div class="confirm-card"><div class="confirm-header"><svg class="confirm-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><div class="confirm-text">${escHtml(text||'Confirm action?')}</div></div><div class="confirm-actions"><button class="confirm-btn confirm-yes" onclick="resolveConfirm(true)">Confirm</button><button class="confirm-btn confirm-no" onclick="resolveConfirm(false)">Cancel</button></div></div>`;
+}
+
 function styleCell(val) {
   val = String(val).replace(/\n+/g,' ').replace(/\s{2,}/g,' ').trim();
   const v=val.toLowerCase();
@@ -687,20 +874,7 @@ function styleCell(val) {
   if (['void','voided','cancelled','canceled'].includes(v)) return `<span class="cell-void">${escHtml(val)}</span>`;
   return escHtml(val);
 }
-function renderPanel(d) {
-  const title=d.title||'Details',fields=d.fields||[],note=d.note||'';
-  const rows=fields.map(([l,v])=>`<div class="detail-row"><div class="detail-label">${escHtml(l)}</div><div class="detail-value">${styleCell(String(v))}</div></div>`).join('');
-  return `<div class="detail-card"><div class="detail-card-title">${escHtml(title)}</div><div class="detail-card-rows">${rows}</div></div>${note?`<p style="margin-top:8px;color:var(--text-3);font-size:12px;font-style:italic">${escHtml(note)}</p>`:''}`;
-}
-function renderStatusBlock(ok,headline,detail) {
-  const cls=ok?'ok':'err';
-  const icon=ok?`<svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>`
-               :`<svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>`;
-  return `<div class="status-block ${cls}">${icon}<div><div class="status-headline">${escHtml(headline)}</div>${detail?`<div class="status-detail">${escHtml(detail)}</div>`:''}</div></div>`;
-}
-function renderConfirm(text) {
-  return `<div class="confirm-card"><div class="confirm-header"><svg class="confirm-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><div class="confirm-text">${escHtml(text||'Confirm action?')}</div></div><div class="confirm-actions"><button class="confirm-btn confirm-yes" onclick="resolveConfirm(true)">Confirm</button><button class="confirm-btn confirm-no" onclick="resolveConfirm(false)">Cancel</button></div></div>`;
-}
+
 function markdownToHtml(md) {
   if (!md) return '';
   let h = escHtml(md);
@@ -712,6 +886,7 @@ function markdownToHtml(md) {
   h = h.split(/\n{2,}/).map(p=>{p=p.trim();if(!p||p.startsWith('<h')||p.startsWith('<table')||p.startsWith('<div'))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   return h;
 }
+
 function renderMdTable(html) {
   return html.replace(/((?:\|.+\|\n?)+)/g, block=>{
     const lines=block.trim().split('\n').filter(l=>l.trim());
@@ -750,7 +925,6 @@ async function sendMessage() {
   const text = inputBox.value.trim();
   if (!text||isStreaming) return;
   inputBox.value=''; autoResize(inputBox); setLoading(true);
-
   appendUserMsg(text);
   appendTyping();
   try { await streamChat(text); }
@@ -761,99 +935,107 @@ async function sendMessage() {
 // ── SSE stream ────────────────────────────────────────────────────
 async function streamChat(message) {
   const resp = await fetch(`${API_BASE}/chat/stream`,{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      message,
-      session_id: sessionId||undefined,
-      mcp_url:    mcpUrl,
-      org_id:     orgId,
-    }),
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ message, session_id: sessionId||undefined, mcp_url: mcpUrl, org_id: orgId }),
   });
+
   if (!resp.ok) {
     const err = await resp.text();
     replaceBotMsg({type:'error',reply:`Server error ${resp.status}: ${err}`},[],0); return;
   }
-  const reader=resp.body.getReader(), dec=new TextDecoder();
-  let buf='', streamDiv=null, streamSpan=null, streamText='', t0=Date.now();
+
+  const reader = resp.body.getReader(), dec = new TextDecoder();
+  let buf = '', streamDiv = null, streamSpan = null, streamText = '', t0 = Date.now();
+
+  // Reset live table tracking for this new query
+  activeLiveTableId = null;
 
   while (true) {
-    const {value,done}=await reader.read(); if(done)break;
-    buf+=dec.decode(value,{stream:true});
-    const parts=buf.split('\n\n'); buf=parts.pop()??'';
-    for (const part of parts) {
-      const line=part.trim(); if(!line.startsWith('data:'))continue;
-      let evt; try{evt=JSON.parse(line.slice(5).trim());}catch{continue;}
+    const {value,done} = await reader.read(); if(done) break;
+    buf += dec.decode(value, {stream:true});
+    const parts = buf.split('\n\n'); buf = parts.pop() ?? '';
 
-      if (evt.type==='token') {
-        if (!streamDiv) { streamDiv=createStreamingBubble(); streamSpan=streamDiv.querySelector('#streamText'); }
-        streamText+=evt.token||''; if(streamSpan)streamSpan.textContent=streamText; scrollBottom();
-      }
-      else if (evt.type==='done') {
-        const elapsed=Date.now()-t0;
-        if (evt.session_id) { sessionId=evt.session_id; sessionDisp.textContent=sid6(sessionId); }
-        const fakeResult={type:'reply',structured:evt.structured,reply:streamText};
-        if (streamDiv) {
-          const bubble=streamDiv.querySelector('.msg-bubble');
-          const cursor=bubble.querySelector('.stream-cursor'); if(cursor)cursor.remove();
-          renderResult(bubble,fakeResult);
-          const meta=streamDiv.querySelector('.msg-meta');
-          const time=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-          const tools=(evt.tools_used||[]).slice(0,6).map(t=>`<span class="msg-tool-tag">${escHtml(t)}</span>`).join('');
-          if(meta)meta.innerHTML=`<span>${time}</span><span class="elapsed">${elapsed}ms</span>${tools?`<div class="msg-tools">${tools}</div>`:''}`;
+    for (const part of parts) {
+      const line = part.trim(); if (!line.startsWith('data:')) continue;
+      let evt; try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+
+      // ── token: stream text chars ──────────────────────────────
+      if (evt.type === 'token') {
+        if (!streamDiv) {
+          streamDiv  = createStreamingBubble();
+          streamSpan = streamDiv.querySelector('#streamText');
         }
+        streamText += evt.token || '';
+        if (streamSpan) streamSpan.textContent = streamText;
         scrollBottom();
       }
-      else if (evt.type==='table_append') {
-        const tbl = document.getElementById('liveTable');
-        if (tbl) {
-          const tbody = tbl.querySelector('tbody');
-          (evt.rows || []).forEach(row => {
-            const tr = document.createElement('tr');
-            tr.className = 'row-new';
-            row.forEach(cell => {
-              const td = document.createElement('td');
-              td.innerHTML = styleCell(String(cell));
-              tr.appendChild(td);
-            });
-            tbody.appendChild(tr);
-            setTimeout(() => tr.classList.remove('row-new'), 500);
-          });
-          const footer = document.getElementById('liveTableFooter');
-          if (footer) {
-            const pill  = footer.querySelector('.table-loading-pill');
-            const count = footer.querySelector('.table-row-count');
-            if (count) count.textContent = `${evt.total_so_far} records loaded`;
-            if (pill && !evt.has_more) pill.style.display = 'none';
+
+      // ── done: final render ────────────────────────────────────
+      else if (evt.type === 'done') {
+        const elapsed = Date.now() - t0;
+        if (evt.session_id) { sessionId = evt.session_id; sessionDisp.textContent = sid6(sessionId); }
+
+        const structured = evt.structured;
+
+        if (streamDiv) {
+          const bubble = streamDiv.querySelector('.msg-bubble');
+          const cursor = bubble.querySelector('.stream-cursor'); if (cursor) cursor.remove();
+          const meta   = streamDiv.querySelector('.msg-meta');
+          const time   = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+          const tools  = (evt.tools_used||[]).slice(0,6).map(t=>`<span class="msg-tool-tag">${escHtml(t)}</span>`).join('');
+          if (meta) meta.innerHTML = `<span>${time}</span><span class="elapsed">${elapsed}ms</span>${tools?`<div class="msg-tools">${tools}</div>`:''}`;
+
+          if (structured && structured.format === 'table') {
+            // ── PAGINATED TABLE PATH ──────────────────────────────
+            bubble.innerHTML = '';
+            bubble.classList.add('has-table');
+            // FIX: generate a fresh tableId for each query.
+            // The old code used id="liveTable" on the DOM, which meant
+            // the second query would find the first query's stale table.
+            // Now each table gets a unique JS key, fully decoupled from DOM ids.
+            const newTableId = genTableId();
+            renderPagedTable(bubble, structured, newTableId);
+
+            // Register as active live table ONLY if more pages are coming
+            if (structured.__more_pages__) {
+              activeLiveTableId = newTableId;
+            }
+          } else {
+            // Non-table: render normally
+            renderResult(bubble, {type:'reply', structured, reply: streamText});
           }
         }
         scrollBottom();
       }
-      else if (evt.type==='table_complete') {
-        const footer = document.getElementById('liveTableFooter');
-        if (footer) {
-          footer.querySelector('.table-loading-pill')?.remove();
-          const count = footer.querySelector('.table-row-count');
-          if (count) count.textContent = `Showing all ${evt.total} records`;
-        }
-        // FIX: Remove liveTable id once pagination is complete so it doesn't
-        // interfere with the next query's table (which will claim the id fresh).
-        document.getElementById('liveTable')?.removeAttribute('id');
+
+      // ── table_append: more rows streamed in ───────────────────
+      else if (evt.type === 'table_append') {
+        // Uses activeLiveTableId (set in 'done' handler above), not a DOM id.
+        // This is the core fix for the second-query bug.
+        liveTableAppend(evt.rows || [], evt.total_so_far, evt.has_more);
+        scrollBottom();
       }
-      else if (evt.type==='confirm') {
-        if(evt.session_id){sessionId=evt.session_id;sessionDisp.textContent=sid6(sessionId);}
-        replaceBotMsg({type:'confirm',confirm_text:evt.confirm_text},[],Date.now()-t0);
+
+      // ── table_complete: pagination finished ───────────────────
+      else if (evt.type === 'table_complete') {
+        liveTableComplete(evt.total);
       }
-      else if (evt.type==='error') {
+
+      // ── confirm ───────────────────────────────────────────────
+      else if (evt.type === 'confirm') {
+        if (evt.session_id) { sessionId = evt.session_id; sessionDisp.textContent = sid6(sessionId); }
+        replaceBotMsg({type:'confirm', confirm_text: evt.confirm_text}, [], Date.now()-t0);
+      }
+
+      // ── error ─────────────────────────────────────────────────
+      else if (evt.type === 'error') {
         const msg = evt.message || 'Unknown error';
-        const isMcpError = msg.toLowerCase().includes('mcp') ||
-                           msg.toLowerCase().includes('connect') ||
-                           msg.toLowerCase().includes('502') ||
-                           msg.toLowerCase().includes('server');
-        if (isMcpError) {
-          replaceBotMsg({type:'error',reply:'⚠️  ' + msg + '\n\nCheck that your MCP server is running and the URL is correct, then reload the page to reconnect.'},[],Date.now()-t0);
-        } else {
-          replaceBotMsg({type:'error',reply:msg},[],Date.now()-t0);
-        }
+        const isMcpError = msg.toLowerCase().includes('mcp') || msg.toLowerCase().includes('connect')
+                        || msg.toLowerCase().includes('502') || msg.toLowerCase().includes('server');
+        replaceBotMsg({type:'error', reply: isMcpError
+          ? '⚠️ ' + msg + '\n\nCheck that your MCP server is running and the URL is correct, then reload the page to reconnect.'
+          : msg
+        }, [], Date.now()-t0);
         showToast(msg, 6000);
       }
     }
