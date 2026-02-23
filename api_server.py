@@ -8,7 +8,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from typing import Any, AsyncIterator, Optional
 
 import httpx
@@ -332,6 +332,7 @@ async def api_summarize(
     user_question: str = "",
 ) -> dict:
     prompt = (
+        f"TODAY: {date.today().isoformat()}\n"
         f"USER_QUESTION: {user_question or '(not specified — use best judgement on format)'}\n"
         f"TOOL: {tool}\n"
         f"ARGS: {json.dumps(args, default=str)}\n"
@@ -926,9 +927,11 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
                 result_str    = _safe_result_str(gemini_input)
                 prompt_gemini = (
+                    f"TODAY: {date.today().isoformat()}\n"
                     f"USER_QUESTION: {user_q or '(not specified)'}\n"
                     f"TOOL: {last_tool}\n"
                     f"RESULT: {result_str}"
+                    
                 )
 
                 buf = ""
@@ -1096,3 +1099,4 @@ BASE_DIR = Path(__file__).resolve().parent
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return FileResponse(BASE_DIR / "favicon.ico", media_type="image/x-icon")
+
