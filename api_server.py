@@ -1258,15 +1258,76 @@ async def _gemini_summarize_single(gemini_client, tool_name: str,
 # 2. Gemini path sent sample_records[:3] → Gemini couldn't filter 3 rows
 # 3. _should_use_table returned empty sample_records when paginate_meta set
 
-_AGGREGATION_KEYWORDS: frozenset[str] = frozenset({
-    "total", "sum", "how many", "count", "average",
-    "how much", "what is the total", "calculate", "add up",
-})
+# ---------------------------------------------------------------------------
+# Query classification
+# ---------------------------------------------------------------------------
+# Three tiers, evaluated in order:
+#
+#  PYTHON_MATH   — formulas Python computes exactly:
+#                  totals, counts, averages, profit (invoices - bills)
+#
+#  PYTHON_TABLE  — plain list/filter with no analysis needed:
+#                  "show me invoices", "list bills for january"
+#
+#  GEMINI_ANALYSIS — everything else that needs intelligence:
+#                  rankings ("top 5"), comparisons, trends, "who/which/why",
+#                  "best/worst", multi-criteria questions, natural language
+#                  summaries, etc.
+#
+# The key insight: Python should NEVER try to handle analytical questions
+# via keyword lists — that will always have gaps. Gemini gets those instead,
+# with the FULL filtered dataset so it can answer correctly.
+
+_PYTHON_MATH_PATTERNS = (
+    r'\btotal\b', r'\bsum\b', r'\bhow much\b', r'\bamount\b',
+    r'\bhow many\b', r'\bcount\b', r'\bnumber of\b',
+    r'\baverage\b', r'\bmean\b', r'\bavg\b',
+    r'\bprofit\b', r'\bnet income\b', r'\bnet profit\b', r'\bearnings\b',
+    r'\boutstanding\b', r'\breceivable\b', r'\bpayable\b',
+    r'\bbalance\b', r'\bowed\b',
+)
+
+_GEMINI_ANALYSIS_PATTERNS = (
+    r'\btop\s+\d+\b',     r'\bbottom\s+\d+\b',
+    r'\branking\b',        r'\branked\b',
+    r'\bbest\b',           r'\bworst\b',
+    r'\bhighest\b',        r'\blowest\b',
+    r'\blargest\b',        r'\bsmallest\b',  r'\bbiggest\b',
+    r'\bwho\b',            r'\bwhich\b',
+    r'\bmost\b',           r'\bleast\b',     r'\bfrequent\b',
+    r'\bcompare\b',        r'\bcomparison\b', r'\btrend\b',
+    r'\bgrowth\b',         r'\bincrease\b',  r'\bdecrease\b',
+    r'\banalysis\b',       r'\banalyze\b',   r'\binsight\b',
+    r'\bperformance\b',    r'\bbreakdown\b', r'\bsummarize\b',
+    r'\bby value\b',       r'\bby revenue\b', r'\bby volume\b',
+    r'\bby amount\b',      r'\bby total\b',  r'\bby customer\b',
+)
+
+def _classify_query(user_question: str) -> str:
+    """
+    Returns one of: "python_math", "gemini_analysis", "python_table"
+
+    python_math     → Python computes exact totals, counts, profit
+    gemini_analysis → Gemini answers with full filtered dataset
+    python_table    → Python builds a simple list/filter table
+    """
+    q = user_question.lower()
+
+    # Gemini analysis takes priority — catch rankings, comparisons, etc.
+    if any(re.search(p, q) for p in _GEMINI_ANALYSIS_PATTERNS):
+        return "gemini_analysis"
+
+    # Python math — exact numeric computations
+    if any(re.search(p, q) for p in _PYTHON_MATH_PATTERNS):
+        return "python_math"
+
+    # Everything else: plain list/filter
+    return "python_table"
 
 
 def _user_wants_aggregation(user_question: str) -> bool:
-    q = user_question.lower()
-    return any(kw in q for kw in _AGGREGATION_KEYWORDS)
+    """Legacy alias — kept for api_summarize compatibility."""
+    return _classify_query(user_question) == "python_math"
 
 
 def _should_use_table(
@@ -1389,49 +1450,70 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             if isinstance(last_result, dict):
                 paginate_meta = last_result.pop("__paginate__", None)
 
-            # ── Route: Python handles everything; Gemini only for detail/action ──
-            t_summ_start = time.monotonic()
+            # ── Routing: 4-tier dispatch ──────────────────────────────────
+            t_summ_start  = time.monotonic()
+            query_class   = _classify_query(user_q)
+            is_action_tool = any(w in last_tool.lower() for w in
+                                 ("create","update","delete","void","send","submit","mark"))
 
-            # Extract records from last result and apply filters
+            # Extract records + apply Python filters (name/date/status)
             list_key, all_records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
             filtered_records = _python_filter_records(all_records, user_q)
-
             _page1_col_keys: list[str] = []
-            is_action_tool = any(w in last_tool.lower() for w in
-                                 ("create", "update", "delete", "void", "send", "submit", "mark"))
 
             if is_action_tool:
-                # Action result → Gemini for natural status message
+                # Tier 1 — Action result: Gemini writes a natural status message
                 structured = await _gemini_summarize_single(
                     a.gemini, last_tool, user_q, last_result, cid
                 )
 
-            elif _user_wants_aggregation(user_q):
-                # AGGREGATE — always computed in Python using ALL step results.
-                # all_step_results contains raw results from every tool called
-                # (e.g. both list_invoices + list_bills for a profit query).
-                # _python_aggregate applies filters and computes per entity type.
+            elif query_class == "python_math":
+                # Tier 2 — Exact math: Python computes totals/counts/profit
+                # Uses ALL step results so multi-tool queries (profit = invoices - bills) work.
                 structured = _python_aggregate(user_q, last_tool, all_step_results)
 
-            elif len(filtered_records) == 0:
-                # No records matched
-                structured = _python_no_records(user_q, last_tool)
-
-            elif len(filtered_records) == 1:
-                # Single record → Gemini detail panel
-                structured = await _gemini_summarize_single(
-                    a.gemini, last_tool, user_q, filtered_records[0], cid
-                )
+            elif query_class == "gemini_analysis" or (
+                len(filtered_records) == 1 and not is_action_tool
+            ):
+                # Tier 3 — Analytical / single-record: Gemini answers with full data
+                # For analytical queries (rankings, comparisons, trends, "top N", "who", etc.)
+                # we give Gemini the complete filtered dataset as a compact JSON.
+                # Gemini has full context to rank, compare, group, or summarize.
+                if len(filtered_records) == 0:
+                    structured = _python_no_records(user_q, last_tool)
+                else:
+                    # Build a compact record set for Gemini — keep key fields only
+                    # to avoid hitting token limits on large datasets.
+                    _KEY_FIELDS = frozenset({
+                        "invoice_number","bill_number","customer_name","vendor_name",
+                        "contact_name","name","date","due_date","total","balance",
+                        "balance_due","amount","status","invoice_id","bill_id",
+                        "contact_id","currency_code","sub_total",
+                    })
+                    compact = [
+                        {k: v for k, v in r.items() if k in _KEY_FIELDS}
+                        for r in filtered_records if isinstance(r, dict)
+                    ]
+                    gemini_payload = {
+                        "records": compact[:500],   # cap at 500 records for token safety
+                        "total_records": len(filtered_records),
+                    }
+                    structured = await _gemini_summarize_single(
+                        a.gemini, last_tool, user_q, gemini_payload, cid
+                    )
 
             else:
-                # List/filter → Python table
-                structured = _build_table_structured(
-                    last_result, last_tool,
-                    more_pages=bool(paginate_meta),
-                    records_override=filtered_records,
-                )
-                _page1_col_keys = structured.get("col_keys") or []
-                structured.pop("col_keys", None)
+                # Tier 4 — Plain list/filter: Python table (fast, no AI needed)
+                if len(filtered_records) == 0:
+                    structured = _python_no_records(user_q, last_tool)
+                else:
+                    structured = _build_table_structured(
+                        last_result, last_tool,
+                        more_pages=bool(paginate_meta),
+                        records_override=filtered_records,
+                    )
+                    _page1_col_keys = structured.get("col_keys") or []
+                    structured.pop("col_keys", None)
 
             log.info("summarize_latency", extra={
                 "cid": cid, "ms": int((time.monotonic()-t_summ_start)*1000),
