@@ -576,13 +576,6 @@ async def _run_plan(sess: AgentSession, plan: dict, cid: str) -> dict:
     if ok and last_result is not None:
         last_tool  = steps[-1].get("tool", "")
         user_q     = steps[-1].get("note", "")
-        # For __memory__ sentinel, use the tool name from the cached result
-        if last_tool == "__memory__":
-            for entry in reversed(sess.memory):
-                if isinstance(entry, dict) and "tool" in entry and "result" in entry:
-                    if "error" not in entry and "schema_error" not in entry:
-                        last_tool = entry.get("tool", last_tool)
-                        break
         structured = await api_summarize(a.gemini, last_tool, steps[-1].get("args", {}), last_result, cid,
                                               user_question=user_q)
         sess.state.clear_workflow()
@@ -1093,14 +1086,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             log.info("exec_latency", extra={"cid": cid, "ms": int((time.monotonic()-t_exec_start)*1000), "tools": tools_used})
 
             if not ok:
-                # execute_plan now returns an error dict on failure so we
-                # can show the real reason instead of the generic message.
+                # execute_plan returns an error dict with the real failure reason
                 if isinstance(last_result, dict) and last_result.get("__execution_error__"):
-                    err_tool = last_result.get("tool", "")
-                    err_msg  = last_result.get("message", "Execution failed.")
-                    display  = f"Could not complete: {err_msg}"
-                    if "No cached data" in err_msg:
-                        display = "No previous data in memory — please fetch the list first (e.g. 'show all invoices')."
+                    err_msg = last_result.get("message", "Execution failed.")
+                    display = f"Could not complete: {err_msg}"
                 else:
                     display = "Execution failed. Please try rephrasing your request."
                 yield sse({"type": "error", "message": display,
@@ -1111,16 +1100,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             last_tool = last_step.get("tool", "")
             user_q    = last_step.get("note", "") or req.message
 
-            # If planner used __memory__, resolve the real source tool name
-            # so the summarizer gets the right entity type context.
-            if last_tool == "__memory__":
-                for entry in reversed(sess.memory):
-                    if isinstance(entry, dict) and entry.get("tool") and "result" in entry:
-                        if "error" not in entry and "schema_error" not in entry:
-                            t = entry.get("tool", "")
-                            if "list_" in t or "get_" in t:
-                                last_tool = t
-                                break
+
 
             # ── Extract pagination metadata BEFORE routing ────────────────
             paginate_meta = None
