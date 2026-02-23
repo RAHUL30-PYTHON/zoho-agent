@@ -584,68 +584,82 @@ PLANNER_SYSTEM = """
 You are a Zoho Books agent planner. Given a user request, MEMORY of past results,
 and a TOOLBOX, produce a JSON execution plan.
 
-═══════════════════════════════════════════════════════
-OUTPUT FORMAT — return exactly ONE of these JSON shapes:
-═══════════════════════════════════════════════════════
+OUTPUT FORMAT - return exactly ONE of these JSON shapes:
 
   Ask for missing info:
     {"type":"ask","text":"<question>","save":{}}
 
   Execute tools:
-    {"type":"plan","steps":[{"tool":"<name>","args":{...},"note":"<user question verbatim>"}]}
+    {"type":"plan","steps":[{"tool":"<n>","args":{...},"note":"<user question verbatim>"}]}
 
   Confirm before executing risky tools (delete/void/refund):
     {"type":"confirm","text":"<what will happen>","on_yes":{...plan...},"on_no":{...}}
 
-═══════════════════════════════════════
-TOOL SELECTION — follow this hierarchy:
-═══════════════════════════════════════
+  Use cached data - NO API call needed:
+    {"type":"plan","steps":[{"tool":"__memory__","args":{},"note":"<user question verbatim>"}]}
 
-1. SINGLE ENTITY (user names a specific invoice/contact/bill by ID or number):
-   → Use get_<entity> if the ID is already in MEMORY
-   → Use search_<entity> if you need to find by name/number first
-   → NEVER use list_<entity> when you only need one record
+===========================================================
+STEP 0 - CHECK MEMORY BEFORE PLANNING (always do this first)
+===========================================================
 
-2. LISTING / FILTERING / TOTALS (user wants a set: "all invoices", "overdue bills", etc.):
-   → ALWAYS use list_<entity> with per_page=200
-   → Do NOT add any filter parameters (status, date, customer_name, etc.)
-   → The summarizer will filter and compute from the full result
-   → Reason: Zoho filter params are unreliable and incomplete
+Look at MEMORY for the most recent successful tool result.
 
-3. SEARCH BY NAME (user mentions a customer/vendor name without an ID):
-   → Use search_contacts or list_contacts first to get the contact_id
-   → Then use that ID in subsequent steps if needed
+USE __memory__ (skip the API call) when ALL of these are true:
+  1. MEMORY has a recent result from a list_* tool (list_invoices, list_bills, etc.)
+  2. The new question is about the SAME entity type (invoices->invoices, bills->bills)
+  3. The new question is a follow-up: filter, total, aggregate, count, or "from X"
+
+EXAMPLES - use __memory__, do NOT call an API tool:
+  Previous turn called list_invoices -> got invoices in memory
+  User: "tell me total amount i will receive from punjab national bank" -> __memory__
+  User: "how many are overdue"                                          -> __memory__
+  User: "total outstanding"                                             -> __memory__
+  User: "filter for january 2026"                                       -> __memory__
+  User: "show only paid invoices"                                       -> __memory__
+  User: "what is the total balance"                                     -> __memory__
+
+EXAMPLES - must fetch fresh, do NOT use __memory__:
+  User: "show bills" (different entity)           -> list_bills
+  User: "refresh" / "reload" / "get latest"       -> list_invoices fresh
+  User: "get invoice #INV-999" (specific entity)  -> get_invoice
+  MEMORY is empty or contains only errors         -> fetch fresh
+
+The __memory__ sentinel tells the summarizer to use the last successful
+list result from MEMORY. No MCP tool call is made.
+
+==========================================
+STEP 1 - TOOL SELECTION (if not __memory__)
+==========================================
+
+1. SINGLE ENTITY (user names a specific record by ID or number):
+   -> Use get_<entity> if the ID is in MEMORY
+   -> Use search_<entity> if you need to find it first
+   -> NEVER use list_<entity> for a single record
+
+2. LISTING / FILTERING / TOTALS (user wants a set of records):
+   -> ALWAYS use list_<entity> with per_page=200
+   -> Do NOT add filter params (status, date, customer_name, etc.)
+   -> The summarizer filters from the full result
+
+3. SEARCH BY NAME (no ID known):
+   -> Use search_contacts first to get the contact_id if needed
 
 4. MULTI-STEP CHAINS:
-   → Reference earlier step results with {{steps[N].field_name}}
-   → e.g. to get details after listing: steps[0] gets the list,
-     steps[1] uses {{steps[0].invoices[0].invoice_id}}
+   -> Reference earlier step results with {{steps[N].field_name}}
 
 5. PAGINATION: Always include per_page=200 in list_* calls.
 
-═══════════════════════════════════════════
-MEMORY USAGE — critical for correct answers:
-═══════════════════════════════════════════
-
-• Before planning, ALWAYS check MEMORY for entity IDs from previous turns.
-• If the user says "get details", "show me that one", "update it", etc.,
-  look up the ID in MEMORY instead of fetching the list again.
-• If MEMORY has a contact_id / invoice_id / bill_id for the entity the user
-  is asking about, use get_<entity> directly with that ID.
-• If MEMORY shows a previous step failed with a schema error, fix the args
-  before retrying — do not repeat the same mistake.
-
-════════════════════════════
+============================
 ARGUMENT CONSTRUCTION RULES:
-════════════════════════════
+============================
 
-• Read the schema "required" field carefully — it tells you exactly which
-  top-level args the tool needs.
-• organization_id is almost always required — include it from STATE.
-• Some tools wrap everything in a "body" or "JSONString" field — check schema.
-• Never invent argument names not listed in "allowed".
-• Set "note" to the user's exact question verbatim — this drives summarization.
+* Check the schema "required" field - include every required arg.
+* organization_id is almost always required - take it from STATE.
+* Some tools need a "body" or "JSONString" wrapper - check schema.
+* Never invent arg names not in "allowed".
+* Set "note" to the user's exact question verbatim.
 """.strip()
+
 
 
 def _slim_toolbox(toolbox: dict[str, ToolMeta], user_msg: str, memory: list[dict]) -> dict:
@@ -1327,6 +1341,30 @@ async def execute_step(
     tool_name: str = step.get("tool", "")
     args: dict     = dict(step.get("args") or {})
 
+    # __memory__ sentinel: reuse last successful list_* result from memory.
+    # The planner uses this for follow-up filter/aggregate queries so we
+    # don't make unnecessary API calls that can fail or hit rate limits.
+    if tool_name == "__memory__":
+        for entry in reversed(memory):
+            if not isinstance(entry, dict):
+                continue
+            if "error" in entry or "schema_error" in entry:
+                continue
+            result = entry.get("result")
+            if not result or not isinstance(result, dict):
+                continue
+            entry_tool = entry.get("tool", "")
+            if "list_" in entry_tool or "get_" in entry_tool:
+                log.info("memory_reuse", extra={
+                    "cid": correlation_id, "source_tool": entry_tool,
+                })
+                return True, result
+        msg = "No cached data in memory. Please fetch fresh data first."
+        add_memory(memory, {"error": msg, "tool": "__memory__", "cid": correlation_id},
+                   gemini_client, correlation_id)
+        log.warning("memory_reuse_miss", extra={"cid": correlation_id})
+        return False, None
+
     if not tool_name or tool_name not in toolbox:
         msg = f"Unknown tool: '{tool_name}'"
         add_memory(memory, {"error": msg, "step": step, "cid": correlation_id},
@@ -1428,9 +1466,39 @@ async def execute_plan(
     steps: list[dict],
     correlation_id: str,
 ) -> tuple[bool, Optional[Any]]:
-    """Execute a plan's steps sequentially (or in parallel batches)."""
+    """
+    Execute a plan's steps sequentially (or in parallel batches).
+
+    Returns (True, last_result) on success.
+    Returns (False, error_dict) on failure — where error_dict contains the
+    last error recorded in memory so callers can show a useful message
+    instead of the generic "Execution failed." string.
+    """
     last_result: Optional[Any] = None
     step_results: list[Any] = []
+
+    def _last_error() -> Optional[Any]:
+        """Extract the most recent error from memory for surfacing to the user."""
+        for entry in reversed(memory):
+            if not isinstance(entry, dict):
+                continue
+            if "error" in entry:
+                return {"__execution_error__": True,
+                        "tool":    entry.get("tool", "unknown"),
+                        "message": str(entry["error"])}
+            if "schema_error" in entry:
+                se = entry["schema_error"]
+                tool = entry.get("tool", "unknown")
+                parts = []
+                if se.get("missing_required"):
+                    parts.append(f"missing required args: {se['missing_required']}")
+                if se.get("unknown_keys"):
+                    parts.append(f"unknown args: {se['unknown_keys']}")
+                return {"__execution_error__": True,
+                        "tool":    tool,
+                        "message": f"Schema error on {tool} — {'; '.join(parts)}"}
+        return {"__execution_error__": True, "tool": "unknown",
+                "message": "Execution failed — check server logs for details."}
 
     i = 0
     while i < len(steps):
@@ -1461,7 +1529,7 @@ async def execute_plan(
             results = await asyncio.gather(*tasks)
             for (ok, rdata), s in zip(results, batch):
                 if not ok:
-                    return False, None
+                    return False, _last_error()
                 last_result = rdata
                 step_results.append(rdata)
             i = j
@@ -1471,7 +1539,7 @@ async def execute_plan(
             session, toolbox, state, memory, audit, step, correlation_id, gemini
         )
         if not ok:
-            return False, None
+            return False, _last_error()
 
         last_result = rdata
         step_results.append(rdata)
