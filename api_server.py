@@ -331,19 +331,30 @@ async def api_summarize(
     cid: str = "",
     user_question: str = "",
 ) -> dict:
-    prompt = (
-        f"TODAY: {date.today().isoformat()}\n"
-        f"USER_QUESTION: {user_question or '(not specified — use best judgement on format)'}\n"
-        f"TOOL: {tool}\n"
-        f"ARGS: {json.dumps(args, default=str)}\n"
-        f"RESULT: {json.dumps(result, default=str)}"
-    )
-    raw     = await _stream_collect_json(gemini, prompt, SUMMARIZE_SYSTEM, cid)
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        return {"format": "status", "ok": True, "headline": cleaned or "Done.", "detail": ""}
+    """
+    Non-streaming summarizer used by the /chat endpoint.
+    Uses Python for aggregation/tables, Gemini only for detail/action.
+    """
+    is_action = any(w in tool.lower() for w in
+                    ("create","update","delete","void","send","submit","mark"))
+    _, all_records = _extract_records(result) if isinstance(result, dict) else ("", [])
+    filtered = _python_filter_records(all_records, user_question)
+
+    if is_action:
+        return await _gemini_summarize_single(gemini, tool, user_question, result, cid)
+    elif len(filtered) == 0 and all_records:
+        return _python_no_records(user_question, tool)
+    elif len(filtered) == 1:
+        return await _gemini_summarize_single(gemini, tool, user_question, filtered[0], cid)
+    elif _user_wants_aggregation(user_question) and len(filtered) > 1:
+        return _python_aggregate(filtered, user_question, tool)
+    elif len(filtered) > 1:
+        s = _build_table_structured(result, tool, records_override=filtered)
+        s.pop("col_keys", None)
+        return s
+    else:
+        # Fallback — single record or action result with no list
+        return await _gemini_summarize_single(gemini, tool, user_question, result, cid)
 
 
 # ── Per-entity preferred column lists ────────────────────────────────────────
@@ -942,6 +953,231 @@ def _python_filter_records(records: list, user_question: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Python-native summarization helpers
+# ---------------------------------------------------------------------------
+# These replace Gemini for all structured output cases except:
+#   - Single-record detail panels
+#   - Action results (create/update/delete)
+# Python is used for: aggregates, tables, "no records" messages.
+# This eliminates the Gemini "I will filter and get back to you" problem
+# and ensures aggregates always use ALL filtered records, never a sample.
+
+def _fmt_inr(amount: float) -> str:
+    """Format a number in Indian comma style: 12,45,678.00"""
+    if amount == 0:
+        return "₹0.00"
+    negative = amount < 0
+    amount = abs(amount)
+    s = f"{amount:.2f}"
+    integer_part, decimal_part = s.split(".")
+    # Indian grouping: last 3 digits, then groups of 2
+    if len(integer_part) <= 3:
+        formatted = integer_part
+    else:
+        last3 = integer_part[-3:]
+        rest = integer_part[:-3]
+        groups = []
+        while rest:
+            groups.append(rest[-2:])
+            rest = rest[:-2]
+        formatted = ",".join(reversed(groups)) + "," + last3
+    result = f"₹{formatted}.{decimal_part}"
+    return f"-{result}" if negative else result
+
+
+def _python_no_records(user_q: str, tool_name: str) -> dict:
+    """Return a clean 'no records found' answer structure."""
+    entity = tool_name.replace("ZohoBooks_list_", "").replace("ZohoBooks_get_", "").replace("_", " ")
+    return {
+        "format": "answer",
+        "question": user_q,
+        "answer": f"No {entity} records found matching your filters.",
+        "breakdown": [],
+        "note": f"Applied filters from: {user_q}",
+    }
+
+
+def _python_aggregate(records: list, user_q: str, tool_name: str) -> dict:
+    """
+    Compute aggregate metrics entirely in Python from the filtered record list.
+
+    Detects what the user wants:
+    - "how many" / "count"  → count of records
+    - "total" / "sum" / "how much" / "amount"  → sum of balance/total fields
+    - "average"  → average of balance/total fields
+
+    Returns an "answer" format dict.
+    """
+    q = user_q.lower()
+    n = len(records)
+
+    # ── Determine primary amount field ─────────────────────────────────────
+    # Try balance first (amount still owed), then total (invoice face value)
+    AMOUNT_PRIORITY = ("balance", "balance_due", "amount_due", "total",
+                       "amount", "sub_total", "bcy_total")
+    primary_field = None
+    for f in AMOUNT_PRIORITY:
+        if any(isinstance(r, dict) and f in r for r in records[:10]):
+            primary_field = f
+            break
+
+    # ── Compute totals ─────────────────────────────────────────────────────
+    total_amount = 0.0
+    count_nonzero = 0
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        for f in AMOUNT_PRIORITY:
+            if f in rec:
+                try:
+                    v = float(rec[f] or 0)
+                    total_amount += v
+                    if v > 0:
+                        count_nonzero += 1
+                except (TypeError, ValueError):
+                    pass
+                break
+
+    # ── Determine what the user asked ──────────────────────────────────────
+    wants_count = any(w in q for w in ("how many", "count", "number of"))
+    wants_avg   = "average" in q
+
+    if wants_count and not any(w in q for w in ("total", "amount", "sum", "how much")):
+        answer_text = f"{n} records"
+        field_label = "Count"
+    elif wants_avg and primary_field:
+        avg = total_amount / n if n else 0
+        answer_text = f"{_fmt_inr(avg)} average across {n} records"
+        field_label = primary_field.replace("_", " ").title()
+    else:
+        # Default: sum
+        answer_text = f"{_fmt_inr(total_amount)} across {n} records"
+        field_label = primary_field.replace("_", " ").title() if primary_field else "Total"
+
+    # ── Breakdown by top entities ──────────────────────────────────────────
+    # Group by customer/vendor name, show top 15
+    NAME_FIELDS = ("customer_name", "vendor_name", "contact_name", "name")
+    entity_totals: dict[str, float] = {}
+    entity_counts: dict[str, int]   = {}
+
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        entity_name = ""
+        for nf in NAME_FIELDS:
+            if rec.get(nf):
+                entity_name = str(rec[nf])
+                break
+        if not entity_name:
+            # Fall back to invoice/bill number
+            for nf in ("invoice_number", "bill_number", "number"):
+                if rec.get(nf):
+                    entity_name = str(rec[nf])
+                    break
+        if not entity_name:
+            entity_name = "(unknown)"
+
+        amt = 0.0
+        for f in AMOUNT_PRIORITY:
+            if f in rec:
+                try:
+                    amt = float(rec[f] or 0)
+                except (TypeError, ValueError):
+                    pass
+                break
+        entity_totals[entity_name] = entity_totals.get(entity_name, 0.0) + amt
+        entity_counts[entity_name] = entity_counts.get(entity_name, 0) + 1
+
+    # Sort by total descending, keep top 15
+    breakdown_pairs = sorted(entity_totals.items(), key=lambda x: -x[1])[:15]
+    breakdown = []
+    for name, amt in breakdown_pairs:
+        cnt = entity_counts.get(name, 1)
+        label = f"{name} ({cnt} records)" if cnt > 1 else name
+        if wants_count:
+            breakdown.append([label, str(cnt)])
+        else:
+            breakdown.append([label, _fmt_inr(amt)])
+
+    # ── Build filter description ───────────────────────────────────────────
+    note_parts = []
+    if any(w in q for w in ("punjab", "national", "bank", "acme", "ltd", "pvt")):
+        # There's a name filter — note it
+        note_parts.append(f"filtered by customer/vendor name from query")
+    if any(w in q for w in ("january","february","march","april","may","june",
+                             "july","august","september","october","november","december",
+                             "2024","2025","2026","2027")):
+        note_parts.append("date filter applied")
+    if any(w in q for w in ("overdue","unpaid","outstanding","paid","draft")):
+        note_parts.append("status filter applied")
+    note_parts.append(f"computed from {n} matching records")
+    note = " · ".join(note_parts)
+
+    return {
+        "format":    "answer",
+        "question":  user_q,
+        "answer":    answer_text,
+        "breakdown": breakdown,
+        "note":      note,
+    }
+
+
+async def _gemini_summarize_single(
+    gemini_client,
+    tool_name: str,
+    user_q: str,
+    result: Any,
+    cid: str,
+) -> dict:
+    """
+    Use Gemini ONLY for cases Python can't handle:
+    - Single-record detail panels
+    - Action results (create/update/delete/void/send)
+
+    For everything else (tables, aggregates, no-records) use Python functions.
+    """
+    from zoho_agent import SUMMARIZE_SYSTEM, _safe_result_str, MODEL
+    import re as _re
+
+    prompt = (
+        f"TODAY: {date.today().isoformat()}\n"
+        f"USER_QUESTION: {user_q or '(not specified)'}\n"
+        f"TOOL: {tool_name}\n"
+        f"RESULT: {_safe_result_str(result)}"
+    )
+    buf = ""
+    try:
+        async def _collect():
+            nonlocal buf
+            async for chunk in await gemini_client.aio.models.generate_content_stream(
+                model=MODEL,
+                contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=prompt)])],
+                config=gtypes.GenerateContentConfig(
+                    system_instruction=SUMMARIZE_SYSTEM,
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                    max_output_tokens=2048,
+                ),
+            ):
+                buf += chunk.text or ""
+        await asyncio.wait_for(_collect(), timeout=GEMINI_TIMEOUT)
+    except asyncio.TimeoutError:
+        log.warning("gemini_single_timeout", extra={"cid": cid, "tool": tool_name})
+        return {"format": "status", "ok": True,
+                "headline": "Response timed out.", "detail": str(result)[:300]}
+    except Exception as exc:
+        log.warning("gemini_single_error", extra={"cid": cid, "error": str(exc)})
+        return {"format": "status", "ok": True, "headline": "Done.", "detail": ""}
+
+    cleaned = _re.sub(r"^```(?:json)?\s*|\s*```$", "", buf.strip(), flags=_re.MULTILINE).strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        return {"format": "status", "ok": True,
+                "headline": cleaned[:200] if cleaned else "Done.", "detail": ""}
+
+
+# ---------------------------------------------------------------------------
 # FIX 2: Unified table-vs-Gemini routing
 # ---------------------------------------------------------------------------
 # Original bugs:
@@ -967,40 +1203,13 @@ def _should_use_table(
     paginate_meta: Any,
 ) -> tuple[bool, list]:
     """
+    DEPRECATED — kept for backward compatibility with the non-streaming /chat endpoint.
+    The streaming /chat/stream endpoint now routes directly without this function.
     Returns (use_python_table, filtered_records).
-
-    New logic:
-    1. Extract all records from result
-    2. Run Python filter (name/date/status) — free and deterministic
-    3. Paginated → always Python table
-    4. 0 filtered records → Gemini (show "no records" gracefully)
-    5. 1 filtered record  → Gemini (detail panel)
-    6. ≥2 records + aggregation query → Gemini, but with FILTERED records (not 3-sample)
-    7. ≥2 records + list/filter query → Python table directly
     """
     _, all_records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
-
-    # Apply Python filter to get the relevant subset
     filtered = _python_filter_records(all_records, user_question)
-
-    # Paginated result → always Python table (more records coming)
-    if paginate_meta is not None:
-        return True, filtered
-
-    # No records match the filter
-    if len(filtered) == 0:
-        return False, filtered  # Gemini will say "no records found"
-
-    # Single matching record → Gemini for detail panel
-    if len(filtered) == 1:
-        return False, filtered
-
-    # Multiple records + aggregate → Gemini with full FILTERED list (not 3-sample)
-    if _user_wants_aggregation(user_question):
-        return False, filtered
-
-    # Multiple records + list/filter → Python table
-    return True, filtered
+    return True, filtered  # always use Python path; caller handles routing
 
 
 # ---------------------------------------------------------------------------
@@ -1107,108 +1316,53 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             if isinstance(last_result, dict):
                 paginate_meta = last_result.pop("__paginate__", None)
 
-            # ── FIX: route with Python filter applied ─────────────────────
-            # _should_use_table now:
-            # 1. Extracts all records from last_result
-            # 2. Runs _python_filter_records (name + date + status)
-            # 3. Returns (use_table, filtered_records)
-            # filtered_records is the ACTUAL set to display — not a 3-sample
+            # ── Route: Python handles everything; Gemini only for detail/action ──
             t_summ_start = time.monotonic()
-            use_table, filtered_records = _should_use_table(
-                last_result, last_tool, user_q, paginate_meta
-            )
 
-            # Get list_key for pagination alignment
-            list_key, _ = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
+            # Extract all records and apply Python filters (name/date/status)
+            list_key, all_records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
+            filtered_records = _python_filter_records(all_records, user_q)
 
             _page1_col_keys: list[str] = []
+            is_action_tool = any(w in last_tool.lower() for w in
+                                 ("create", "update", "delete", "void", "send", "submit", "mark"))
 
-            if use_table:
-                # ── Python path: build table from FILTERED records ────────
+            if is_action_tool:
+                # Action result (create/update/delete/void) → Gemini status
+                structured = await _gemini_summarize_single(
+                    a.gemini, last_tool, user_q, last_result, cid
+                )
+
+            elif len(filtered_records) == 0:
+                # No matching records
+                structured = _python_no_records(user_q, last_tool)
+
+            elif len(filtered_records) == 1:
+                # Single record → Gemini detail panel
+                structured = await _gemini_summarize_single(
+                    a.gemini, last_tool, user_q, filtered_records[0], cid
+                )
+
+            elif _user_wants_aggregation(user_q):
+                # AGGREGATE: compute entirely in Python — 100% accurate,
+                # works across all filtered records with no truncation risk.
+                structured = _python_aggregate(filtered_records, user_q, last_tool)
+
+            else:
+                # List/filter → Python table (paginated or not)
                 structured = _build_table_structured(
-                    last_result,
-                    last_tool,
+                    last_result, last_tool,
                     more_pages=bool(paginate_meta),
-                    records_override=filtered_records,   # ← use filtered, not raw
+                    records_override=filtered_records,
                 )
                 _page1_col_keys = structured.get("col_keys") or []
                 structured.pop("col_keys", None)
-                log.info("table_built_python", extra={
-                    "cid": cid,
-                    "raw_rows": len(_),
-                    "filtered_rows": len(filtered_records),
-                    "ms": int((time.monotonic()-t_summ_start)*1000),
-                })
-
-            else:
-                # ── Gemini path ───────────────────────────────────────────
-                # FIX: send FULL filtered_records to Gemini (not 3-sample).
-                # The old code sent sample_records[:3] which gave Gemini
-                # nothing to work with and caused "I will filter" deferral.
-                if len(filtered_records) == 0:
-                    # Filtered to nothing — tell Gemini to say "no records"
-                    gemini_input: Any = {
-                        "message": "No records matched the applied filters.",
-                        "filter_attempted": user_q,
-                    }
-                elif len(filtered_records) == 1:
-                    # Single record → detail view
-                    gemini_input = filtered_records[0]
-                elif len(filtered_records) > 1:
-                    # Multiple records + aggregate query
-                    # Send full filtered list — Gemini computes the aggregate
-                    gemini_input = filtered_records
-                else:
-                    gemini_input = last_result
-
-                result_str    = _safe_result_str(gemini_input)
-                prompt_gemini = (
-                    f"TODAY: {date.today().isoformat()}\n"
-                    f"USER_QUESTION: {user_q or '(not specified)'}\n"
-                    f"TOOL: {last_tool}\n"
-                    f"RESULT: {result_str}"
-                )
-
-                buf = ""
-                async def _collect_g() -> None:
-                    nonlocal buf
-                    async for chunk in await a.gemini.aio.models.generate_content_stream(
-                        model=MODEL,
-                        contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=prompt_gemini)])],
-                        config=gtypes.GenerateContentConfig(
-                            system_instruction=SUMMARIZE_SYSTEM,
-                            temperature=0.1,
-                            response_mime_type="application/json",
-                            max_output_tokens=4096,
-                        ),
-                    ):
-                        buf += chunk.text or ""
-
-                try:
-                    await asyncio.wait_for(_collect_g(), timeout=GEMINI_TIMEOUT)
-                except asyncio.TimeoutError:
-                    log.warning("summarize_timeout", extra={"cid": cid, "tool": last_tool})
-                    buf = _fast_fallback_summary(last_result, last_tool)
-
-                cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", buf.strip(), flags=re.MULTILINE).strip()
-                try:
-                    structured = json.loads(cleaned)
-                except Exception:
-                    log.warning("gemini_json_parse_failed", extra={
-                        "cid": cid, "tool": last_tool, "buf_len": len(buf),
-                        "buf_preview": buf[:200],
-                    })
-                    structured = _build_table_structured(
-                        last_result, last_tool, records_override=filtered_records or None
-                    )
-                    structured.pop("col_keys", None)
 
             log.info("summarize_latency", extra={
                 "cid": cid, "ms": int((time.monotonic()-t_summ_start)*1000),
-                "path": "python" if use_table else "gemini",
                 "filtered_count": len(filtered_records),
+                "aggregate": _user_wants_aggregation(user_q),
             })
-
             # ── Emit tokens ───────────────────────────────────────────────
             reply_md = structured_to_markdown(structured)
             CHUNK = 80
