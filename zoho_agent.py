@@ -112,24 +112,16 @@ def _resolve_value(template: str, step_results: list[Any]) -> Any:
     """
     Resolve a template string like "{{steps[0].contacts[0].contact_id}}"
     against the list of previous step results.
-
-    Returns the resolved value, or the original string if it can't resolve.
     """
     match = re.fullmatch(r'\{\{(.+?)\}\}', template.strip())
     if not match:
         return template
 
     path = match.group(1).strip()
-    # path looks like: steps[0].contacts[0].contact_id
-    # or:              steps[0].invoices[0].invoice_id
-
-    # Parse the path into tokens
-    # e.g. ["steps[0]", "contacts[0]", "contact_id"]
     tokens = path.split('.')
     current: Any = {"steps": step_results}
 
     for token in tokens:
-        # Handle array indexing: token = "steps[0]" or "contacts[0]"
         arr_match = re.fullmatch(r'(\w+)\[(\d+)\]', token)
         try:
             if arr_match:
@@ -144,18 +136,13 @@ def _resolve_value(template: str, step_results: list[Any]) -> Any:
                 elif isinstance(current, list):
                     current = current[int(token)]
         except (KeyError, IndexError, TypeError, ValueError):
-            # Path doesn't resolve — return original template so the
-            # error surfaces clearly rather than silently passing None
             return template
 
     return current
 
 
 def _resolve_args(args: dict, step_results: list[Any]) -> dict:
-    """
-    Walk all args and resolve any {{...}} template values.
-    Handles nested dicts and lists recursively.
-    """
+    """Walk all args and resolve any {{...}} template values."""
     resolved = {}
     for k, v in args.items():
         if isinstance(v, str) and '{{' in v:
@@ -323,30 +310,35 @@ class AgentState:
 # ---------------------------------------------------------------------------
 # Schema helpers
 # ---------------------------------------------------------------------------
-    
 
 def _slim_memory_for_planner(memory_entries: list) -> list:
     """
-    Strips or summarises large 'result' values from memory entries before
-    sending them to the Gemini planner.
+    Strips large 'result' values from memory entries before sending to the
+    Gemini planner — but PRESERVES all entity IDs, names, and key values
+    needed for chained operations and context continuity.
 
-    The planner needs to know:
-      - Which tools were called
-      - What arguments were used
-      - Whether the call succeeded (errors)
-      - Key entity IDs/names from the result (first 3 records max)
-
-    The planner does NOT need the full 1700-row result payload.
-    Sending it causes the planner prompt to exceed Gemini's token budget,
-    producing the "ran into a problem" error after the 2nd large query.
+    FIX over original: The original stripped too aggressively and lost entity
+    IDs (contact_id, invoice_id, etc.) that are needed for follow-up queries.
+    Now we keep a richer set of fields from sample records.
     """
+    # Fields that are always worth keeping for context continuity
+    _CONTEXT_FIELDS = frozenset({
+        "invoice_number", "bill_number", "contact_name", "customer_name",
+        "vendor_name", "invoice_id", "bill_id", "contact_id", "item_id",
+        "name", "total", "balance", "status", "date", "due_date",
+        "payment_number", "amount", "email", "phone", "company_name",
+        "estimate_number", "salesorder_number", "purchaseorder_number",
+        "creditnote_number", "expense_id", "account_id", "account_name",
+        "payment_id", "reference_number", "currency_code",
+    })
+
     slimmed = []
     for entry in memory_entries:
         if not isinstance(entry, dict):
             slimmed.append(entry)
             continue
 
-        e = dict(entry)  # shallow copy — don't mutate original
+        e = dict(entry)
 
         if "result" in e and isinstance(e["result"], dict):
             result = e["result"]
@@ -357,41 +349,31 @@ def _slim_memory_for_planner(memory_entries: list) -> list:
                 if isinstance(v, list) and len(v) > len(best_arr):
                     best_key, best_arr = k, v
 
-            if len(best_arr) > 3:
-                # Replace full result with a compact summary
-                # Keep only the first 3 records so the planner knows the shape
-                sample = best_arr[:3]
-                # Strip noisy fields from samples too
+            if len(best_arr) > 5:
+                # Keep up to 8 sample records (up from 3) so follow-up
+                # queries have enough entity IDs to work with
+                sample = best_arr[:8]
                 clean_sample = []
                 for rec in sample:
                     if isinstance(rec, dict):
                         clean_sample.append({
                             k: v for k, v in rec.items()
-                            if k in (
-                                "invoice_number", "bill_number", "contact_name",
-                                "customer_name", "vendor_name", "invoice_id",
-                                "bill_id", "contact_id", "item_id", "name",
-                                "total", "balance", "status", "date", "due_date",
-                                "payment_number", "amount", "email",
-                            )
+                            if k in _CONTEXT_FIELDS
                         })
                     else:
                         clean_sample.append(rec)
 
                 e["result"] = {
-                    "__slimmed__":   True,
-                    "record_count":  len(best_arr),
-                    "record_key":    best_key,
+                    "__slimmed__":    True,
+                    "record_count":   len(best_arr),
+                    "record_key":     best_key,
                     "sample_records": clean_sample,
-                    # Preserve page_context so planner knows pagination state
                     **({"page_context": result["page_context"]}
                        if "page_context" in result else {}),
                 }
-            # else: small result (<= 3 records) — keep as-is
 
         slimmed.append(e)
     return slimmed
-
 
 
 def compact_schema(schema: dict, max_props: int = MAX_TOOL_PROPS) -> dict:
@@ -472,18 +454,23 @@ def _estimate_tokens(obj: Any) -> int:
 MEMORY_SUMMARIZE_SYSTEM = """
 You are a memory compressor for a Zoho Books AI agent.
 You will receive a list of past tool call records (tool name, args, result, errors).
-Produce a single compact JSON object that preserves ALL facts the agent would need
-to continue the conversation: entity IDs, names, amounts, statuses, errors, and
-what actions were taken. Drop raw API payloads but keep all meaningful values.
+
+CRITICAL: Preserve ALL entity IDs and names — they are needed for follow-up queries.
+Produce a compact JSON object with every fact the agent needs to continue the conversation.
 
 Return ONLY this JSON shape — no prose, no markdown:
 {
   "type": "summary",
   "covers_entries": <integer count of entries summarised>,
   "facts": {
-    "<entity_type>": [{"id": "...", "name": "...", "<key>": "<value>", ...}, ...],
-    "actions_taken": ["<verb> <entity> <id>", ...],
-    "errors": ["<brief description>", ...]
+    "invoices":   [{"id": "...", "number": "...", "customer": "...", "total": ..., "balance": ..., "status": "..."}, ...],
+    "bills":      [{"id": "...", "number": "...", "vendor": "...", "total": ..., "status": "..."},   ...],
+    "contacts":   [{"id": "...", "name": "...", "email": "...", "type": "..."},                      ...],
+    "items":      [{"id": "...", "name": "...", "rate": ...},                                        ...],
+    "payments":   [{"id": "...", "number": "...", "amount": ..., "customer": "..."},                 ...],
+    "other":      [{"entity": "...", "id": "...", "key_fields": {}},                                 ...],
+    "actions_taken": ["<verb> <entity_type> <id_or_name>", ...],
+    "errors":        ["<brief description>", ...]
   }
 }
 """.strip()
@@ -520,10 +507,9 @@ def add_memory(
 ):
     memory.append(entry)
 
-    # ── NEW: trim large results stored in memory IMMEDIATELY ──────
-    # The full result is only needed during summarization (which happens
-    # synchronously before add_memory is called). After that, we slim it
-    # down so it doesn't balloon the planner payload on future turns.
+    # Trim large raw results in memory to control token usage —
+    # but only AFTER the result has already been used for summarization.
+    # Keep up to 10 records (up from 5) so chained queries can reference IDs.
     last = memory[-1]
     if isinstance(last, dict) and "result" in last and isinstance(last["result"], dict):
         result = last["result"]
@@ -531,13 +517,14 @@ def add_memory(
         for k, v in result.items():
             if isinstance(v, list) and len(v) > len(best_arr):
                 best_key, best_arr = k, v
-        if len(best_arr) > 5:
+        if len(best_arr) > 10:
+            # Keep the first 10 records for ID-chaining, trim the rest
             last["result"] = {
                 "__trimmed__":  True,
                 "record_count": len(best_arr),
                 "record_key":   best_key,
+                "sample":       best_arr[:10],  # kept for follow-up queries
             }
-    # ── END NEW ──────────────────────────────────────────────────
 
     total_tokens = sum(_estimate_tokens(m) for m in memory)
     over_entries = len(memory) > MAX_MEMORY_ENTRIES
@@ -571,49 +558,132 @@ def add_memory(
 # ---------------------------------------------------------------------------
 # Planner
 # ---------------------------------------------------------------------------
+
+# FIX: Completely rewritten PLANNER_SYSTEM.
+#
+# The original had three problems that caused wrong tool selection:
+#
+# 1. No guidance on HOW to choose between similar tools.
+#    e.g. list_invoices vs search_invoices vs get_invoice — the model guessed.
+#
+# 2. "NEVER pass filters" instruction was contradicted by the summarizer
+#    prompt which told Gemini to filter. The planner didn't understand
+#    that it fetches everything and the summarizer filters later.
+#
+# 3. No instruction to use memory entity IDs for chained operations,
+#    so follow-up queries like "now get details for the first one" would
+#    re-fetch everything instead of using the ID from memory.
+#
+# Fixed version:
+# - Explicit tool-selection hierarchy (list > search > get)
+# - Clear explanation of the fetch-all-then-filter pattern
+# - Explicit instruction to use IDs from memory for single-entity lookups
+# - Better handling of multi-step plans with dependency references
+
 PLANNER_SYSTEM = """
-You are a Zoho Books agent. Analyse the user's request and produce a JSON plan.
+You are a Zoho Books agent planner. Given a user request, MEMORY of past results,
+and a TOOLBOX, produce a JSON execution plan.
 
+═══════════════════════════════════════════════════════
+OUTPUT FORMAT — return exactly ONE of these JSON shapes:
+═══════════════════════════════════════════════════════
 
-OUTPUT — valid JSON only:
-  {"type":"ask","text":"...","save":{}}
-  {"type":"plan","steps":[{"tool":"...","args":{...},"note":"...","parallel":false}]}
-  {"type":"confirm","text":"...","on_yes":{...},"on_no":{...}}
+  Ask for missing info:
+    {"type":"ask","text":"<question>","save":{}}
 
-RULES:
-1. Read the tool schema carefully to find how args are structured.
-   Some tools take top-level args. Some wrap everything inside a
-   "query_params", "body", or "JSONString" field — check "required"
-   in the schema to know which pattern applies.
-2. Always include organization_id and per_page=200 in the correct
-   location as determined by the schema structure.
-3. NEVER pass filters like status, date, customer_name — fetch all
-   data unfiltered. The summarizer handles all filtering.
-4. Pick the right tool based on what the user is asking about.
-5. Set "note" to the user's exact question verbatim.
-6. For risky operations (delete, void, refund): use type "confirm".
+  Execute tools:
+    {"type":"plan","steps":[{"tool":"<name>","args":{...},"note":"<user question verbatim>"}]}
+
+  Confirm before executing risky tools (delete/void/refund):
+    {"type":"confirm","text":"<what will happen>","on_yes":{...plan...},"on_no":{...}}
+
+═══════════════════════════════════════
+TOOL SELECTION — follow this hierarchy:
+═══════════════════════════════════════
+
+1. SINGLE ENTITY (user names a specific invoice/contact/bill by ID or number):
+   → Use get_<entity> if the ID is already in MEMORY
+   → Use search_<entity> if you need to find by name/number first
+   → NEVER use list_<entity> when you only need one record
+
+2. LISTING / FILTERING / TOTALS (user wants a set: "all invoices", "overdue bills", etc.):
+   → ALWAYS use list_<entity> with per_page=200
+   → Do NOT add any filter parameters (status, date, customer_name, etc.)
+   → The summarizer will filter and compute from the full result
+   → Reason: Zoho filter params are unreliable and incomplete
+
+3. SEARCH BY NAME (user mentions a customer/vendor name without an ID):
+   → Use search_contacts or list_contacts first to get the contact_id
+   → Then use that ID in subsequent steps if needed
+
+4. MULTI-STEP CHAINS:
+   → Reference earlier step results with {{steps[N].field_name}}
+   → e.g. to get details after listing: steps[0] gets the list,
+     steps[1] uses {{steps[0].invoices[0].invoice_id}}
+
+5. PAGINATION: Always include per_page=200 in list_* calls.
+
+═══════════════════════════════════════════
+MEMORY USAGE — critical for correct answers:
+═══════════════════════════════════════════
+
+• Before planning, ALWAYS check MEMORY for entity IDs from previous turns.
+• If the user says "get details", "show me that one", "update it", etc.,
+  look up the ID in MEMORY instead of fetching the list again.
+• If MEMORY has a contact_id / invoice_id / bill_id for the entity the user
+  is asking about, use get_<entity> directly with that ID.
+• If MEMORY shows a previous step failed with a schema error, fix the args
+  before retrying — do not repeat the same mistake.
+
+════════════════════════════
+ARGUMENT CONSTRUCTION RULES:
+════════════════════════════
+
+• Read the schema "required" field carefully — it tells you exactly which
+  top-level args the tool needs.
+• organization_id is almost always required — include it from STATE.
+• Some tools wrap everything in a "body" or "JSONString" field — check schema.
+• Never invent argument names not listed in "allowed".
+• Set "note" to the user's exact question verbatim — this drives summarization.
 """.strip()
 
 
 def _slim_toolbox(toolbox: dict[str, ToolMeta], user_msg: str, memory: list[dict]) -> dict:
-    user_lower = user_msg.lower()
-    recent_tools = {m.get("tool", "") for m in memory[-6:] if "tool" in m}
+    """
+    Return a toolbox dict for the planner with full schemas for relevant tools
+    and brief descriptions for everything else.
 
+    FIX over original: The original returned only {"desc", "read_only"} for
+    non-relevant tools, meaning if domain-hint detection missed, the planner
+    got zero schema info and hallucinated arguments.
+
+    New approach:
+    - Relevant tools (domain match OR recently used): full schema
+    - All other tools: description + required args only (not just desc)
+      so the planner can at least construct valid calls if it chooses them
+    """
+    user_lower = user_msg.lower()
+    recent_tools = {m.get("tool", "") for m in memory[-10:] if "tool" in m}
+
+    # Broader domain hints — more keywords, catch more edge cases
     DOMAIN_HINTS = [
-        ({"invoice", "invoic", "receivable", "receive", "customer payment"}, "invoice"),
-        ({"bill", "payable", "vendor payment", "pay vendor"}, "bill"),
-        ({"contact", "customer", "vendor", "supplier"}, "contact"),
-        ({"item", "product", "service", "inventory"}, "item"),
+        ({"invoice", "invoic", "receivable", "receive", "customer payment",
+          "outstanding", "overdue", "collect"}, "invoice"),
+        ({"bill", "payable", "vendor payment", "pay vendor", "supplier"}, "bill"),
+        ({"contact", "customer", "vendor", "supplier", "client"}, "contact"),
+        ({"item", "product", "service", "inventory", "sku"}, "item"),
         ({"expense"}, "expense"),
-        ({"payment"}, "payment"),
-        ({"credit", "credit note"}, "credit"),
-        ({"bank", "transaction", "reconcil"}, "bank"),
-        ({"report", "summary", "p&l", "profit", "balance sheet"}, "report"),
-        ({"account", "chart"}, "account"),
-        ({"tax", "gst"}, "tax"),
-        ({"estimate", "quote"}, "estimate"),
-        ({"purchase order", "po "}, "purchaseorder"),
-        ({"sales order", "so "}, "salesorder"),
+        ({"payment", "paid", "receipt"}, "payment"),
+        ({"credit", "credit note", "creditnote"}, "credit"),
+        ({"bank", "transaction", "reconcil", "statement"}, "bank"),
+        ({"report", "summary", "p&l", "profit", "loss", "balance sheet",
+          "trial", "aging", "ageing"}, "report"),
+        ({"account", "chart of accounts", "ledger"}, "account"),
+        ({"tax", "gst", "vat", "tds"}, "tax"),
+        ({"estimate", "quote", "quotation"}, "estimate"),
+        ({"purchase order", "po ", "purchaseorder"}, "purchaseorder"),
+        ({"sales order", "so ", "salesorder", "delivery"}, "salesorder"),
+        ({"journal", "journal entry"}, "journal"),
     ]
 
     relevant_substrings: set[str] = set()
@@ -628,24 +698,34 @@ def _slim_toolbox(toolbox: dict[str, ToolMeta], user_msg: str, memory: list[dict
         is_relevant = not relevant_substrings or any(s in name_lower for s in relevant_substrings)
 
         if is_recent or is_relevant:
+            # Full schema for tools the planner is likely to use
             slim[name] = meta.to_planner_dict()
         else:
-            slim[name] = {"desc": meta.desc[:80], "read_only": meta.read_only}
+            # Fallback: description + required args so the planner can still
+            # use this tool correctly if it decides to — just with less detail
+            slim[name] = {
+                "desc":      meta.desc[:100],
+                "required":  meta.required,
+                "read_only": meta.read_only,
+            }
 
     return slim
 
 
 def _build_planner_payload(
-    toolbox: dict,   # dict[str, ToolMeta]
-    state,           # AgentState
+    toolbox: dict,
+    state,
     memory: list,
     user_msg: str,
 ) -> str:
+    # Send last 20 memory entries to the planner (up from 12).
+    # A 3-step plan consumes 3 memory slots; with replanning that's 6+.
+    # 12 entries was too few for multi-turn conversations.
     return json.dumps(
         {
             "TOOLBOX": _slim_toolbox(toolbox, user_msg, memory),
             "STATE":   state.to_dict(),
-            "MEMORY":  _slim_memory_for_planner(memory[-12:]),  # <-- FIX
+            "MEMORY":  _slim_memory_for_planner(memory[-20:]),
             "USER":    user_msg,
         },
         ensure_ascii=False,
@@ -671,7 +751,7 @@ async def gemini_plan(
                 contents=[types.Content(role="user", parts=[types.Part(text=payload)])],
                 config=types.GenerateContentConfig(
                     system_instruction=PLANNER_SYSTEM,
-                    temperature=0.5,
+                    temperature=0.3,  # lower = more deterministic tool selection
                     response_mime_type="application/json",
                     max_output_tokens=2048,
                 ),
@@ -693,62 +773,137 @@ async def gemini_plan(
 # ---------------------------------------------------------------------------
 # Summarizer
 # ---------------------------------------------------------------------------
+
+# FIX: SUMMARIZE_SYSTEM rewritten to improve response quality and formatting.
+#
+# Problems with the original:
+# 1. The filtering rules were correct but underspecified — partial name matches
+#    would fail silently and return "no records" for valid queries.
+# 2. The output format section was too rigid; Gemini would sometimes pick the
+#    wrong format (e.g. "answer" for a list query).
+# 3. Currency formatting was ₹ only — no flexibility for other orgs.
+# 4. No guidance on what to do when the result is a single record (detail view).
+# 5. Missing instruction for action results (create/update/delete responses).
+
 SUMMARIZE_SYSTEM = """
-You are a Zoho Books assistant. You receive raw unfiltered data from a tool call
-and the user's original question in the NOTE field.
+You are a Zoho Books data formatter. You receive a RAW RESULT (already fetched from
+the API) and the user's question. Your ONLY job is to filter the data and format it.
 
-You must filter, aggregate and compute entirely from the raw data yourself.
+YOU ARE NOT A PLANNER. YOU MUST NEVER:
+  ✗ Say "I will filter..." or "I will get back to you"
+  ✗ Say "Let me..." or "I'll now..." or describe future actions
+  ✗ Return format="status" for list/filter/aggregate queries
+  ✗ Return an empty or deferred response
+  ✗ Ask for clarification — work with what you have
 
-TODAY'S DATE: inject dynamically — see implementation note below.
+YOU MUST ALWAYS return a fully populated JSON object with actual data from RESULT.
+The data is already in RESULT. Filter it and show it NOW.
 
-FILTERING RULES — apply before any computation:
+TODAY'S DATE is provided in the prompt.
+
+══════════════════════════════════
+STEP 1 — CLASSIFY THE QUERY
+══════════════════════════════════
+
+  A) LIST / FILTER  → user wants to see records: "give me", "show", "list", "get",
+                      "what are", "invoices of", "for [month/customer]"
+  B) AGGREGATE      → user wants a number: "total", "sum", "how much", "how many",
+                      "count", "amount owed"
+  C) DETAIL         → RESULT has exactly 1 record, or user asked about one specific entity
+  D) ACTION RESULT  → TOOL name contains create/update/delete/void/send
+
+  When in doubt between A and B: choose A (show the table).
+  NEVER choose D (status) for a list or filter query.
+
+══════════════════════════════════
+STEP 2 — FILTER THE RAW DATA
+══════════════════════════════════
+
+The RESULT contains ALL records from Zoho — you must filter them yourself.
+Apply ALL relevant filters from USER_QUESTION at the same time:
 
   By customer/vendor name:
-    Filter records where customer_name or vendor_name contains the name
-    mentioned in the note (case-insensitive partial match).
+    Match customer_name, vendor_name, or contact_name against the name in the question.
+    Use case-insensitive partial match.
+    "punjab national bank" matches "Punjab National Bank Ltd" ✓
+    "fonly punjab national bank" → extract the real name → "punjab national bank" ✓
 
-  By date:
-    Parse the date range from the note:
-      "in 2026"        → keep records where date starts with "2026"
-      "this month"     → keep records where date starts with current YYYY-MM
-      "last month"     → keep records where date starts with previous YYYY-MM
-      "in January"     → keep records where date contains that month
-      "between X and Y"→ keep records where date falls in that range
-    Use the "date" field on each record for comparison.
+  By month/year:
+    "january 2026"   → keep records where date starts with "2026-01"
+    "in 2026"        → keep records where date starts with "2026"
+    "this month"     → keep records where date starts with current YYYY-MM
+    "last month"     → keep records where date starts with previous YYYY-MM
+    "last 30 days"   → keep records where date >= (today minus 30 days)
+    "between X and Y"→ keep records where date is between X and Y inclusive
 
   By status:
-    "pending / outstanding / to collect / to receive / unpaid"
-      → keep only: balance > 0 AND status not in [paid, void, Paid, Void]
-    "paid"   → keep only status = paid
-    "overdue"→ keep only status = overdue or due_date < today
-    no status mentioned → no status filter, keep all
+    "pending / unpaid / outstanding / to collect / to receive"
+      → keep only: balance > 0 AND status NOT IN [paid, void]
+    "paid"    → status = paid
+    "overdue" → status = overdue OR due_date < today
+    "draft"   → status = draft
+    no status word → no status filter
 
-  Combine filters: apply ALL that are relevant simultaneously.
+  Combine all matching filters. If no records survive filtering:
+    Return: {"format":"answer","question":"...","answer":"No matching records found for [filters applied].","breakdown":[],"note":"Filters: [describe exactly what was applied]"}
 
-COMPUTE based on note intent:
-  "total / sum / how much / amount"  → sum the balance field after filtering
-  "list / show / get"                → show filtered records as table
-  "ageing / aging"                   → group by customer/vendor, bucket by days past due_date:
-                                       Current, 1-30d, 31-60d, 61-90d, 90+d
+══════════════════════════════════
+STEP 3 — FORMAT THE OUTPUT
+══════════════════════════════════
 
-RETURN valid JSON only:
+  LIST / FILTER (type A):
+    Use "table" format.
+    Columns: invoice/bill number, customer/vendor name, date, total, balance, status.
+    Sort by date descending. Include ALL filtered records (up to 200 rows).
+    Footer: "N records · Total: ₹X,XX,XXX.XX" (sum the total/balance column).
 
-{"format":"answer","question":"...","answer":"₹X across N records","breakdown":[["Label","₹Value"]],"note":"..."}
+  AGGREGATE (type B):
+    Use "answer" format.
+    Compute the metric yourself from filtered records.
+    Show breakdown by top 10 entities if >1 result.
+    Always state record count.
 
-{"format":"table","title":"...","columns":[...],"rows":[[...]],"footer":"N records — Total: ₹X"}
+  DETAIL (type C):
+    Use "panel" format with all meaningful fields.
+    Skip: template_id, color_code, created_time, is_emailed, exchange_rate.
 
-{"format":"panel","title":"...","fields":[["Label","Value"]],"note":"..."}
+  ACTION (type D):
+    Use "status" format. State what was done and the entity number/ID.
 
-{"format":"status","ok":true,"headline":"...","detail":"..."}
+══════════════════════════════════
+OUTPUT — valid JSON only:
+══════════════════════════════════
 
-RULES:
-- Always filter first, then compute on the filtered set only.
-- Do all arithmetic yourself. Never say "refer to data".
-- Currency: ₹ with Indian comma formatting e.g. ₹12,45,678.00
-- Dates: DD MMM YYYY
-- No markdown ** or backticks inside values.
-- If after filtering no records match, say so clearly in an "answer" with value "₹0.00 — no matching records found".
-""".strip()    
+{"format":"table",
+ "title":"Invoices – Punjab National Bank – January 2026",
+ "columns":["Invoice #","Customer","Date","Total","Balance","Status"],
+ "rows":[["INV-001","Punjab National Bank","01 Jan 2026","₹1,00,000.00","₹50,000.00","Open"],...],
+ "footer":"3 records · Total: ₹3,00,000.00"}
+
+{"format":"answer",
+ "question":"Total outstanding from Punjab National Bank",
+ "answer":"₹1,50,000.00 across 3 invoices",
+ "breakdown":[["INV-001","₹50,000.00"],["INV-002","₹1,00,000.00"]],
+ "note":"Filtered by: customer = Punjab National Bank, status = unpaid"}
+
+{"format":"panel",
+ "title":"Invoice #INV-001",
+ "fields":[["Customer","Punjab National Bank"],["Date","01 Jan 2026"],...],
+ "note":""}
+
+{"format":"status",
+ "ok":true,
+ "headline":"Invoice #INV-001 created",
+ "detail":"Invoice ID: 12345678901"}
+
+ABSOLUTE RULES:
+• ALWAYS filter and populate the output with real data from RESULT — never defer.
+• Never output format="status" for list/filter/aggregate queries.
+• Never use future tense ("I will...", "Let me...", "I'll get back...").
+• Currency: ₹ with Indian comma formatting (₹12,45,678.00).
+• Dates in output: DD MMM YYYY.
+• No markdown ** or backticks inside JSON string values.
+""".strip()
 
 
 def _render_structured(data: dict) -> str:
@@ -879,7 +1034,7 @@ async def _stream_collect_json(
                 contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
                 config=types.GenerateContentConfig(
                     system_instruction=system,
-                    temperature=0.5,
+                    temperature=0.2,
                     response_mime_type="application/json",
                     max_output_tokens=65536,
                 ),
@@ -1030,16 +1185,11 @@ def _is_pageable(tool_name: str) -> bool:
 def _extract_records(result: Any) -> tuple[str, list]:
     """
     Return (key, records_list) for the largest meaningful list in a Zoho result dict.
-
-    FIX: Skip the MCP envelope keys ('content', 'meta', 'isError') so we never
-    accidentally treat the MCP wrapper as the record list.
-    The MCP wrapper looks like: {"content": [{"type":"text","text":"<json>"}], "isError": false}
-    We want the inner Zoho data, not the envelope.
+    Skips MCP envelope keys so we never treat the transport wrapper as records.
     """
     if not isinstance(result, dict):
         return "", []
 
-    # Keys that belong to the MCP transport envelope — never treat as record lists
     _MCP_ENVELOPE_KEYS = frozenset({"content", "meta", "isError", "_meta"})
 
     best_key, best_arr = "", []
@@ -1068,31 +1218,15 @@ def _has_more_pages(result: Any) -> bool:
 def _unwrap_mcp_result(raw: Any) -> Any:
     """
     Unwrap the MCP tool call envelope to get the actual Zoho API response.
-
-    MCP returns results in this shape after model_dump():
-      {
-        "content": [{"type": "text", "text": "<JSON string of Zoho response>"}],
-        "isError": false
-      }
-
-    We need to:
-    1. Detect this envelope structure
-    2. Extract the text content
-    3. Parse it as JSON to get the actual Zoho data dict
-
-    If the result is already a plain dict (not wrapped), return it as-is.
-    If parsing fails at any step, return the original so nothing breaks.
+    MCP returns: {"content": [{"type": "text", "text": "<JSON string>"}], "isError": false}
     """
     if not isinstance(raw, dict):
         return raw
 
     content = raw.get("content")
     if not isinstance(content, list) or not content:
-        # Not an MCP envelope — already unwrapped or different shape
         return raw
 
-    # Check if this looks like an MCP content envelope
-    # (list of {"type": "text", "text": "..."} items)
     first = content[0] if content else {}
     if not isinstance(first, dict) or first.get("type") != "text":
         return raw
@@ -1101,7 +1235,6 @@ def _unwrap_mcp_result(raw: Any) -> Any:
     if not isinstance(text_value, str) or not text_value.strip():
         return raw
 
-    # The text field contains the JSON-encoded Zoho API response
     try:
         parsed = json.loads(text_value)
         log.debug("mcp_envelope_unwrapped", extra={
@@ -1109,30 +1242,15 @@ def _unwrap_mcp_result(raw: Any) -> Any:
         })
         return parsed
     except json.JSONDecodeError:
-        # Not JSON — might be a plain text message or error; return original
         log.warning("mcp_text_not_json", extra={"preview": text_value[:120]})
         return raw
 
 
 def _parse_mcp_result(raw: Any) -> Any:
-    """
-    Convert a raw MCP tool call result into a plain Python dict.
-
-    Steps:
-    1. Call model_dump() if it's a Pydantic model
-    2. Unwrap the MCP content envelope ({"content":[{"type":"text","text":"<json>"}]})
-    3. Return the actual Zoho API response dict
-    """
-    # Step 1: Convert Pydantic model to dict
+    """Convert a raw MCP tool call result into a plain Python dict."""
     if hasattr(raw, "model_dump"):
         raw = raw.model_dump()
-
-    # Step 2: Unwrap MCP envelope — THIS IS THE KEY FIX
-    # Before this fix, _extract_records would find "content" as the largest list
-    # and treat [{"type":"text","text":"..."}] as the record list, producing
-    # TYPE/TEXT columns with raw JSON in the cells.
     raw = _unwrap_mcp_result(raw)
-
     return raw
 
 
@@ -1278,7 +1396,6 @@ async def execute_step(
     elapsed     = round(time.monotonic() - t0, 2)
     cb.record_success()
 
-    # FIX: Use the updated _parse_mcp_result which now unwraps the MCP envelope
     result_data = _parse_mcp_result(result)
 
     if _is_pageable(tool_name) and _has_more_pages(result_data):
@@ -1302,39 +1419,33 @@ async def execute_step(
 
 
 async def execute_plan(
-    session,           # ClientSession
+    session,
     toolbox: dict,
-    state,             # AgentState
+    state,
     memory: list,
-    audit,             # AuditLog
-    gemini,            # genai.Client
+    audit,
+    gemini,
     steps: list[dict],
     correlation_id: str,
 ) -> tuple[bool, Optional[Any]]:
-    """
-    Execute a plan's steps sequentially (or in parallel batches).
-    Resolves {{steps[N].field.path}} references between steps.
-    """
+    """Execute a plan's steps sequentially (or in parallel batches)."""
     last_result: Optional[Any] = None
-    step_results: list[Any] = []   # stores each step's result for chaining
+    step_results: list[Any] = []
 
     i = 0
     while i < len(steps):
         step = steps[i]
 
-        # ── Resolve any template references in args ───────────────────
-        if step_results:  # only resolve if there are previous results
+        if step_results:
             original_args = step.get("args") or {}
             resolved_args = _resolve_args(original_args, step_results)
             if resolved_args != original_args:
                 step = {**step, "args": resolved_args}
 
-        # ── Parallel batch ────────────────────────────────────────────
         if step.get("parallel"):
             batch = [step]
             j = i + 1
             while j < len(steps) and steps[j].get("parallel"):
-                # Resolve parallel steps too
                 ps = steps[j]
                 if step_results:
                     resolved = _resolve_args(ps.get("args") or {}, step_results)
@@ -1343,7 +1454,6 @@ async def execute_plan(
                 batch.append(ps)
                 j += 1
 
-            import asyncio
             tasks = [
                 execute_step(session, toolbox, state, memory, audit, s, correlation_id, gemini)
                 for s in batch
@@ -1357,7 +1467,6 @@ async def execute_plan(
             i = j
             continue
 
-        # ── Sequential step ───────────────────────────────────────────
         ok, rdata = await execute_step(
             session, toolbox, state, memory, audit, step, correlation_id, gemini
         )
@@ -1591,13 +1700,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
