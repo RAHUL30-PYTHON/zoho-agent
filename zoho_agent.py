@@ -516,84 +516,113 @@ INPUT (JSON):
   MEMORY   — recent tool call history (results are summarised, not full)
   USER     — the user's latest message
 
-RULES:
-1. NEVER invent or guess IDs. Look them up with list/get tools first if not in STATE or MEMORY.
+CORE RULES:
+1. NEVER invent or guess IDs. Look them up first if not in STATE or MEMORY.
 2. Only use argument keys present in a tool's "allowed" list.
 3. STATE.organization_id is always set — inject it automatically; never ask for it.
 4. For body/JSONString fields, pass valid JSON constructed from context.
-5. When collecting missing fields for a multi-step operation, do NOT call any tool — only ask.
-6. When MEMORY contains a schema_error, fix the tool call using only allowed keys.
-7. If a required entity (contact, item, etc.) is missing, ask the user to confirm creation.
-8. For independent read-only steps (read_only: true), they may run in parallel.
-9. Continue the active workflow until complete; never ask "What would you like to do?" mid-workflow.
-10. Mark pending_intent in save{} when starting a multi-step workflow so context survives turns.
+5. When MEMORY contains a schema_error, fix using only allowed keys.
+6. Never ask "What would you like to do?" mid-workflow.
 
-PAGINATION — MANDATORY:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PAGINATION — MANDATORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - ALWAYS pass per_page=200 on every list/search call.
-- Never set page=2 yourself — the system auto-fetches remaining pages.
-- Never omit per_page.
+- Never set page=2 — system auto-fetches remaining pages.
 
-STATUS FILTERS — STRICT RULES (read carefully):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DATE FILTERS — exact Zoho format required
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Zoho requires date_start and date_end as separate args in YYYY-MM-DD format.
+NEVER pass a single "date" or "year" argument — it will error.
 
-  *** DO NOT pass a status filter unless one of these exact conditions is met: ***
+  User says "in 2026"          → date_start="2026-01-01", date_end="2026-12-31"
+  User says "in 2025"          → date_start="2025-01-01", date_end="2025-12-31"
+  User says "this month"       → date_start="<first day of current month>", date_end="<today>"
+  User says "last month"       → date_start="<first day of last month>", date_end="<last day of last month>"
+  User says "this year"        → date_start="<Jan 1 of current year>", date_end="<today>"
+  User says "last 30 days"     → date_start="<today minus 30 days>", date_end="<today>"
+  User says "between X and Y"  → date_start="X in YYYY-MM-DD", date_end="Y in YYYY-MM-DD"
+  No date mentioned            → omit both date_start and date_end entirely
 
-  CONDITION A — User explicitly names a status:
-    "show paid invoices"     → status="paid"
-    "show draft invoices"    → status="draft"
-    "show void bills"        → status="void"
-    Only use the EXACT word the user said. Never infer or translate.
+Today's date for reference: use the most recent date you know is accurate.
 
-  CONDITION B — User asks about overdue:
-    "overdue invoices/bills" → status="overdue"
-    This is safe because "overdue" is universally valid across Zoho versions.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CUSTOMER / VENDOR FILTERS — always filter at API level
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When the user asks about a SPECIFIC customer or vendor:
+- NEVER fetch all records and filter later — this wastes tokens and is slow
+- ALWAYS use the most specific tool available:
 
-  FOR ALL OTHER QUERIES — omit the status argument entirely:
-    "pending payments to receive"  → NO status filter (fetch all, summarizer handles it)
-    "outstanding invoices"         → NO status filter
-    "unpaid bills"                 → NO status filter
-    "ageing of receivables"        → NO status filter
-    "ageing of payables"           → NO status filter
-    "how much do customers owe"    → NO status filter
-    "payments to be received"      → NO status filter
-    "what is my receivable"        → NO status filter
+  Step 1: If you don't have the contact_id, call list_contacts or search_contacts
+          with contact_name="<name>" to find the contact_id first.
+          Then use that contact_id in the invoice/bill query.
 
-  WHY: Different Zoho Books versions/regions use different status string values.
-  An invalid status value causes a hard API error. Fetching all records and
-  letting the summarizer filter/aggregate is always safe and correct.
+  Step 2: Call list_invoices or list_bills with:
+          contact_id="<id from step 1>", per_page=200
 
-FILTER DISCIPLINE — avoid over-filtering:
-- For contacts, items, accounts: NEVER add a status filter.
-- For invoices/bills: only add status="paid", status="draft", status="void",
-  or status="overdue" — and only when the user explicitly asked for that status.
-- When in doubt: omit the filter. Fetching more data and summarizing is always
-  safer than fetching less data and returning a wrong or empty result.
+  If the tool allows customer_name directly, use:
+          customer_name="<exact name>", per_page=200
 
-ANSWERING QUESTIONS vs LISTING DATA:
-- USER ASKS FOR A TOTAL / COUNT / SUM / AVERAGE / AGEING:
-    → Fetch all records with per_page=200, NO status filter.
-    → Set step "note" to the user's EXACT question.
-    → The summarizer computes totals, ageing buckets, groupings from the full data.
-- USER ASKS TO LIST / SHOW records → table is fine, still NO status filter unless explicit.
-- USER ASKS A SPECIFIC QUESTION → fetch and answer directly in "note".
+  Example:
+    User: "invoices for Punjab National Bank"
+    → Step 1: search_contacts(contact_name="Punjab National Bank", per_page=200)
+    → Step 2: list_invoices(contact_id="<id>", per_page=200)
+    → note: "Show all invoices for Punjab National Bank"
 
-AGEING ANALYSIS:
-- "Ageing of receivables" / "customerwise ageing" / "ageing of pending payments":
-    → list_invoices(per_page=200)  [NO status filter]
-    → note: "Compute ageing analysis grouped by customer: buckets 0-30, 31-60, 61-90, 90+ days overdue. Show only unpaid/outstanding amounts."
-- "Ageing of payables" / "vendorwise ageing":
-    → list_bills(per_page=200)  [NO status filter]
-    → note: "Compute ageing analysis grouped by vendor: buckets 0-30, 31-60, 61-90, 90+ days overdue. Show only unpaid/open amounts."
+  Example:
+    User: "total amount to collect from Punjab National Bank"
+    → Step 1: search_contacts(contact_name="Punjab National Bank", per_page=200)
+    → Step 2: list_invoices(contact_id="<id>", per_page=200)
+    → note: "Compute total outstanding balance to be collected from Punjab National Bank"
 
-OUTPUT — one of exactly three forms (valid JSON only, no prose):
+  Example:
+    User: "invoices for Punjab National Bank in 2026"
+    → Step 1: search_contacts(contact_name="Punjab National Bank", per_page=200)
+    → Step 2: list_invoices(contact_id="<id>", date_start="2026-01-01", date_end="2026-12-31", per_page=200)
+    → note: "Show invoices for Punjab National Bank created in 2026"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STATUS FILTERS — strict rules
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ONLY pass a status filter when one of these conditions is met:
+  - User explicitly says "paid" invoices/bills   → status="paid"
+  - User explicitly says "draft" invoices         → status="draft"
+  - User explicitly says "void"                   → status="void"
+  - User explicitly says "overdue"                → status="overdue"
+  - Any other case (pending, outstanding, unpaid, ageing, total) → NO status filter
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUESTION TYPE → TOOL STRATEGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"Total / sum / how much / count" for a specific customer/vendor:
+  → filter by contact_id + per_page=200, set note to user's exact question
+  → summarizer will compute the total
+
+"List / show / get" for a specific customer/vendor:
+  → filter by contact_id + per_page=200
+  → summarizer will show a table
+
+"Ageing analysis" (all customers/vendors):
+  → list_invoices(per_page=200) or list_bills(per_page=200), NO other filters
+  → note: "Ageing analysis grouped by customer/vendor with buckets 0-30, 31-60, 61-90, 90+ days"
+
+"All invoices / all bills" (no customer specified):
+  → list_invoices(per_page=200), no filters
+  → summarizer shows full table
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT — valid JSON only, no prose
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 A) Ask user for missing info:
 {"type":"ask","text":"<question>","save":{"key":"value"}}
 
 B) Execute tool steps:
-{"type":"plan","steps":[{"tool":"ToolName","args":{...},"note":"<user's exact question — always set>","parallel":false},...]}
+{"type":"plan","steps":[{"tool":"ToolName","args":{...},"note":"<user's exact question>","parallel":false},...]}
 
-C) Confirm before risky / irreversible action:
-{"type":"confirm","text":"<description + impact>","on_yes":{"type":"plan","steps":[...]},"on_no":{"type":"ask","text":"..."}}
+C) Confirm before risky action:
+{"type":"confirm","text":"<description>","on_yes":{"type":"plan","steps":[...]},"on_no":{"type":"ask","text":"..."}}
 """.strip()
 
 
@@ -696,35 +725,65 @@ async def gemini_plan(
 # Summarizer
 # ---------------------------------------------------------------------------
 SUMMARIZE_SYSTEM = """
-You are a Zoho Books assistant. Given a tool call result and the user's original question, produce the most useful response.
+You are a Zoho Books assistant. Given a tool call result and the user's original question,
+produce the most useful response.
 
-FIRST — read the USER_QUESTION field carefully:
-- If it asks for a TOTAL, SUM, COUNT, AVERAGE, or any aggregated number:
-    → Compute the answer from the raw data yourself (sum all balance/amount fields, count records, etc.)
-    → Respond with format "answer" — a direct, specific answer to the question.
-    → Also include a brief supporting table or summary if helpful.
-- If it asks to LIST or SHOW records → format "table".
-- If it asks about a SINGLE record → format "panel".
-- If it is a simple action confirmation → format "status".
+IMPORTANT: Results may contain all records (paid, unpaid, draft, void) because we fetch
+without status filters. You MUST filter and aggregate the data yourself based on what
+the user actually asked for.
 
-Return ONLY valid JSON in one of these shapes:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1 — Understand what the user wants
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Read USER_QUESTION carefully:
 
-For "answer" (aggregated/computed responses):
+  "total amount to collect / receive / outstanding" from a customer:
+    → Sum the "balance" field for records where balance > 0 and status != "paid"/"void"
+    → Return format: "answer" with the total and a breakdown if useful
+
+  "total amount to pay / outstanding" to a vendor:
+    → Sum the "balance" field for bills where balance > 0 and status != "paid"/"void"
+    → Return format: "answer"
+
+  "list / show invoices / bills" for a customer:
+    → Return format: "table" showing all records for that customer
+    → Include invoice_number, date, due_date, total, balance, status columns
+
+  "invoices in 2026 / this year / last month":
+    → Return format: "table" of matching date-range records
+
+  "ageing analysis":
+    → Filter to records with balance > 0 and status != "paid"/"void"
+    → Compute days_overdue = today - due_date for each record
+    → Group by customer/vendor name
+    → For each group, sum balance into buckets:
+        Current (due_date >= today), 1-30 days, 31-60 days, 61-90 days, 90+ days
+    → Return format: "table" with customer/vendor as rows and buckets as columns
+
+  "pending payments" / "outstanding receivables":
+    → Filter records where balance > 0 and status != "paid"/"void"
+    → Return format: "table" if listing, "answer" if asking for total
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 2 — Choose the right format
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For "answer" (a computed number or summary):
 {
   "format": "answer",
   "question": "<restate the user's question>",
-  "answer": "<direct answer, e.g. 'Total receivable: ₹12,45,678.90 across 47 invoices'>",
+  "answer": "<direct answer e.g. 'Total outstanding: ₹12,45,678.90 across 23 invoices'>",
   "breakdown": [["Label", "Value"], ...],
-  "note": "optional caveat or detail"
+  "note": "optional caveat"
 }
 
-For "table" (listing records):
+For "table" (listing records or ageing):
 {
   "format": "table",
   "title": "string",
   "columns": ["Col1", "Col2", ...],
   "rows": [["val1", "val2", ...], ...],
-  "footer": "e.g. Showing all 47 invoices — Total balance: ₹X"
+  "footer": "Showing X records — Total: ₹Y"
 }
 
 For "panel" (single record detail):
@@ -735,25 +794,25 @@ For "panel" (single record detail):
   "note": "optional"
 }
 
-For "status" (action confirmation or error):
+For "status" (action result):
 {
   "format": "status",
   "ok": true,
-  "headline": "short one-line message",
-  "detail": "optional extra line"
+  "headline": "short message",
+  "detail": "optional"
 }
 
-CRITICAL RULES:
-- For "table": include EVERY record — never truncate. If 200 invoices, output all 200 rows.
-- For "answer": do the arithmetic yourself from the raw data. Never say "see the table above".
-  Sum every balance/amount field, count records, compute what was asked.
-- Currency: always include symbol (₹, $, Rs., etc.)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Always filter out paid/void records when user asked for "pending", "outstanding", "to collect"
+- Always do the arithmetic yourself — never say "see the data above"
+- Currency: always include symbol (₹, $, etc.)
 - Dates: DD MMM YYYY format
-- Status values: capitalise (Open, Paid, Overdue, Draft, Void)
-- Overdue items: note "Overdue by X days" inline
-- No markdown bold (**), asterisks (*), or backticks in values
-- IDs: keep as-is
-- footer on tables must state total count AND total amount if applicable
+- Status: capitalise (Paid, Overdue, Draft, Open, Void)
+- No markdown bold (**) or backticks in values
+- Tables: include every relevant record after your own filtering
+- Footer must state count AND total amount where applicable
 """.strip()
 
 
@@ -1569,6 +1628,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
