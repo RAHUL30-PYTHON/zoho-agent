@@ -673,7 +673,7 @@ async def gemini_plan(
                 contents=[types.Content(role="user", parts=[types.Part(text=payload)])],
                 config=types.GenerateContentConfig(
                     system_instruction=PLANNER_SYSTEM,
-                    temperature=0.2,
+                    temperature=0.5,
                     response_mime_type="application/json",
                     max_output_tokens=2048,
                 ),
@@ -885,7 +885,7 @@ async def _stream_collect_json(
                 contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
                 config=types.GenerateContentConfig(
                     system_instruction=system,
-                    temperature=0.1,
+                    temperature=0.5,
                     response_mime_type="application/json",
                     max_output_tokens=65536,
                 ),
@@ -903,7 +903,7 @@ async def _stream_collect_json(
                 contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
                 config=types.GenerateContentConfig(
                     system_instruction=system,
-                    temperature=0.1,
+                    temperature=0.2,
                     response_mime_type="application/json",
                     max_output_tokens=65536,
                 ),
@@ -1569,6 +1569,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
