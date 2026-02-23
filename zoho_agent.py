@@ -529,61 +529,60 @@ RULES:
 10. Mark pending_intent in save{} when starting a multi-step workflow so context survives turns.
 
 PAGINATION — MANDATORY:
-- ALWAYS pass per_page=200 on every list/search call. This is Zoho's maximum page size.
-  The system auto-fetches remaining pages, so never set page=2 yourself.
+- ALWAYS pass per_page=200 on every list/search call.
+- Never set page=2 yourself — the system auto-fetches remaining pages.
 - Never omit per_page.
 
-STATUS FILTERS — CRITICAL ZOHO API VALUES:
-Zoho Books uses DIFFERENT status values for invoices vs bills. Using the wrong value
-returns 0 records. Always use the correct value for the tool being called:
+STATUS FILTERS — STRICT RULES (read carefully):
 
-  ZohoBooks_list_invoices / ZohoBooks_search_invoices:
-    "outstanding" = invoices not yet paid (use for: pending, unpaid, to receive, receivable)
-    "overdue"     = past due date
-    "paid"        = fully paid
-    "draft"       = not yet sent
-    "sent"        = sent but not paid
-    "void"        = voided
-    NO FILTER     = all invoices (use when user says "all", "every", or no status context)
+  *** DO NOT pass a status filter unless one of these exact conditions is met: ***
 
-  ZohoBooks_list_bills / ZohoBooks_search_bills:
-    "open"        = bills not yet paid (use for: pending, unpaid, to pay, payable)
-    "overdue"     = past due date
-    "paid"        = fully paid
-    "void"        = voided
-    NO FILTER     = all bills
+  CONDITION A — User explicitly names a status:
+    "show paid invoices"     → status="paid"
+    "show draft invoices"    → status="draft"
+    "show void bills"        → status="void"
+    Only use the EXACT word the user said. Never infer or translate.
 
-  ZohoBooks_list_contacts:
-    "active"      = active contacts
-    "inactive"    = inactive
-    NO FILTER     = all contacts (PREFER no filter unless user specifically asks)
+  CONDITION B — User asks about overdue:
+    "overdue invoices/bills" → status="overdue"
+    This is safe because "overdue" is universally valid across Zoho versions.
 
-  ZohoBooks_list_items:
-    "active"      = active items
-    "inactive"    = inactive
-    NO FILTER     = all items (PREFER no filter unless user specifically asks)
+  FOR ALL OTHER QUERIES — omit the status argument entirely:
+    "pending payments to receive"  → NO status filter (fetch all, summarizer handles it)
+    "outstanding invoices"         → NO status filter
+    "unpaid bills"                 → NO status filter
+    "ageing of receivables"        → NO status filter
+    "ageing of payables"           → NO status filter
+    "how much do customers owe"    → NO status filter
+    "payments to be received"      → NO status filter
+    "what is my receivable"        → NO status filter
+
+  WHY: Different Zoho Books versions/regions use different status string values.
+  An invalid status value causes a hard API error. Fetching all records and
+  letting the summarizer filter/aggregate is always safe and correct.
 
 FILTER DISCIPLINE — avoid over-filtering:
-- For contacts, items, accounts: NEVER add a status filter unless the user
-  explicitly said "active" or "inactive". Zoho returns all by default.
-- For invoices/bills: only add a status filter when the user's intent clearly
-  implies one (e.g. "pending", "overdue", "paid"). If the user says "all" or
-  asks a general question, omit the status filter entirely.
-- WRONG: list_invoices(status="unpaid")  ← "unpaid" is not a valid Zoho invoice status
-- RIGHT: list_invoices(status="outstanding")  ← correct Zoho term for unpaid invoices
+- For contacts, items, accounts: NEVER add a status filter.
+- For invoices/bills: only add status="paid", status="draft", status="void",
+  or status="overdue" — and only when the user explicitly asked for that status.
+- When in doubt: omit the filter. Fetching more data and summarizing is always
+  safer than fetching less data and returning a wrong or empty result.
 
 ANSWERING QUESTIONS vs LISTING DATA:
-- USER ASKS FOR A TOTAL / COUNT / SUM / AVERAGE:
-    → Fetch with per_page=200, set step "note" to the user's exact question.
-    → The summarizer computes the answer — do NOT just show a table.
-- USER ASKS TO LIST / SHOW records → table is fine.
+- USER ASKS FOR A TOTAL / COUNT / SUM / AVERAGE / AGEING:
+    → Fetch all records with per_page=200, NO status filter.
+    → Set step "note" to the user's EXACT question.
+    → The summarizer computes totals, ageing buckets, groupings from the full data.
+- USER ASKS TO LIST / SHOW records → table is fine, still NO status filter unless explicit.
 - USER ASKS A SPECIFIC QUESTION → fetch and answer directly in "note".
 
-AGEING / AGEING ANALYSIS:
-- "Ageing of receivables" or "customerwise ageing" → list_invoices(status="outstanding", per_page=200)
-  Set note: "Group by customer, show invoice age buckets: 0-30, 31-60, 61-90, 90+ days"
-- "Ageing of payables" or "vendorwise ageing" → list_bills(status="open", per_page=200)
-  Set note: "Group by vendor, show bill age buckets: 0-30, 31-60, 61-90, 90+ days"
+AGEING ANALYSIS:
+- "Ageing of receivables" / "customerwise ageing" / "ageing of pending payments":
+    → list_invoices(per_page=200)  [NO status filter]
+    → note: "Compute ageing analysis grouped by customer: buckets 0-30, 31-60, 61-90, 90+ days overdue. Show only unpaid/outstanding amounts."
+- "Ageing of payables" / "vendorwise ageing":
+    → list_bills(per_page=200)  [NO status filter]
+    → note: "Compute ageing analysis grouped by vendor: buckets 0-30, 31-60, 61-90, 90+ days overdue. Show only unpaid/open amounts."
 
 OUTPUT — one of exactly three forms (valid JSON only, no prose):
 
@@ -1570,5 +1569,6 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
