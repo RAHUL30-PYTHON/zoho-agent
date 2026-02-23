@@ -333,22 +333,23 @@ async def api_summarize(
 ) -> dict:
     """
     Non-streaming summarizer used by the /chat endpoint.
-    Uses Python for aggregation/tables, Gemini only for detail/action.
+    Uses same 4-tier routing as the streaming endpoint.
     """
     is_action = any(w in tool.lower() for w in
                     ("create","update","delete","void","send","submit","mark"))
     _, all_records = _extract_records(result) if isinstance(result, dict) else ("", [])
     filtered = _python_filter_records(all_records, user_question)
+    query_class = _classify_query(user_question)
 
     if is_action:
         return await _gemini_summarize_single(gemini, tool, user_question, result, cid)
-    elif _user_wants_aggregation(user_question):
-        # Non-streaming path: only has last_result, wrap it
+    elif query_class == "python_math":
         return _python_aggregate(user_question, tool, [result])
+    elif query_class == "gemini_analysis" or len(filtered) == 1:
+        target = filtered[0] if len(filtered) == 1 else {"records": filtered[:500], "total_records": len(filtered)}
+        return await _gemini_summarize_single(gemini, tool, user_question, target, cid)
     elif len(filtered) == 0 and all_records:
         return _python_no_records(user_question, tool)
-    elif len(filtered) == 1:
-        return await _gemini_summarize_single(gemini, tool, user_question, filtered[0], cid)
     elif len(filtered) > 1:
         s = _build_table_structured(result, tool, records_override=filtered)
         s.pop("col_keys", None)
@@ -1209,13 +1210,60 @@ def _python_aggregate(user_q: str, tool_name: str,
     }
 
 
+_VALID_FORMATS = frozenset({"table", "answer", "panel", "status"})
+
+
+def _sanitize_structured(data: dict, user_q: str) -> dict:
+    """
+    Ensure Gemini's response uses only supported format values.
+    Converts any invented format (chart, graph, report, etc.) to "answer"
+    by promoting the most useful content from the unknown structure.
+    """
+    fmt = data.get("format", "")
+    if fmt in _VALID_FORMATS:
+        return data
+
+    # Log the hallucinated format so we can improve the prompt over time
+    log.warning("gemini_invalid_format", extra={"format": fmt, "question": user_q[:80]})
+
+    # Attempt to rescue useful content from the invalid structure
+    # Common hallucinated formats: "chart" (has data=[{label, value}]),
+    # "graph", "report" (has sections=[]), "summary" (has content="")
+    rescued_breakdown: list = []
+
+    # chart/graph: data = [{label: ..., value: ...}, ...]
+    data_list = data.get("data") or data.get("items") or data.get("rows") or []
+    if isinstance(data_list, list):
+        for item in data_list[:30]:
+            if isinstance(item, dict):
+                label = item.get("label") or item.get("name") or item.get("month") or ""
+                value = item.get("value") or item.get("total") or item.get("amount") or ""
+                if label:
+                    rescued_breakdown.append([str(label), str(value)])
+
+    title   = data.get("title", user_q)
+    summary = data.get("summary") or data.get("answer") or data.get("headline") or title
+
+    return {
+        "format":    "answer",
+        "question":  user_q,
+        "answer":    str(summary),
+        "breakdown": rescued_breakdown,
+        "note":      f"(converted from unsupported format '{fmt}')",
+    }
+
+
 async def _gemini_summarize_single(gemini_client, tool_name: str,
                                     user_q: str, result: Any, cid: str) -> dict:
-    """Gemini for single-record detail panels and action results only."""
+    """Gemini for analytical queries, single-record detail panels, and action results."""
     from zoho_agent import SUMMARIZE_SYSTEM, _safe_result_str, MODEL
     import re as _re
+
+    today      = date.today()
+    system_str = SUMMARIZE_SYSTEM.replace("{today}", today.strftime("%d %b %Y"))
+
     prompt = (
-        f"TODAY: {date.today().isoformat()}\n"
+        f"TODAY: {today.isoformat()}\n"
         f"USER_QUESTION: {user_q or '(not specified)'}\n"
         f"TOOL: {tool_name}\n"
         f"RESULT: {_safe_result_str(result)}"
@@ -1228,10 +1276,10 @@ async def _gemini_summarize_single(gemini_client, tool_name: str,
                 model=MODEL,
                 contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=prompt)])],
                 config=gtypes.GenerateContentConfig(
-                    system_instruction=SUMMARIZE_SYSTEM,
+                    system_instruction=system_str,
                     temperature=0.1,
                     response_mime_type="application/json",
-                    max_output_tokens=2048,
+                    max_output_tokens=4096,
                 ),
             ):
                 buf += chunk.text or ""
@@ -1242,12 +1290,15 @@ async def _gemini_summarize_single(gemini_client, tool_name: str,
     except Exception as exc:
         log.warning("gemini_single_error", extra={"cid": cid, "error": str(exc)})
         return {"format": "status", "ok": True, "headline": "Done.", "detail": ""}
+
     cleaned = _re.sub(r"^```(?:json)?\s*|\s*```$", "", buf.strip(), flags=_re.MULTILINE).strip()
     try:
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
+        return _sanitize_structured(parsed, user_q)
     except Exception:
-        return {"format": "status", "ok": True,
-                "headline": cleaned[:200] if cleaned else "Done.", "detail": ""}
+        return {"format": "answer", "question": user_q,
+                "answer": cleaned[:400] if cleaned else "No result.",
+                "breakdown": [], "note": ""}
 
 
 # ---------------------------------------------------------------------------
