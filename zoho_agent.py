@@ -703,6 +703,11 @@ original question in the NOTE field. Filter and compute from the data yourself.
 
 TODAY is provided — use it for all date comparisons.
 
+Assume record fields:
+- date is invoice/bill issue date in YYYY-MM-DD (string)
+- due_date is due date in YYYY-MM-DD (string)
+- balance and total are numbers/strings
+
 STEP 1 — FILTER based on NOTE:
 
   By name: NOTE mentions a specific customer/vendor
@@ -710,19 +715,80 @@ STEP 1 — FILTER based on NOTE:
       that name (case-insensitive partial match)
 
   By date: NOTE mentions a time period
-    "in YYYY" or "year YYYY"  → keep records where date starts with "YYYY"
-    "this month"              → keep records where date starts with TODAY's YYYY-MM
-    "last month"              → keep records where date starts with previous YYYY-MM
-    "this year"               → keep records where date's year = TODAY's year
-    "last 30/60/90 days"      → keep records where date >= TODAY minus N days
-    no date mentioned         → keep all
+    Normalize NOTE to lowercase for matching.
+
+    Supported date patterns:
+
+    A) Year-only
+      "in YYYY" or "year YYYY" or "YYYY" (when clearly used as a year)
+        → keep records where date starts with "YYYY-"
+
+    B) Month + year (FIX)
+      "<monthname> YYYY" or "<mon> YYYY"
+      Examples: "january 2026", "jan 2026", "february 2025"
+        → map monthname/mon to month number MM
+        → keep records where date starts with "YYYY-MM"
+
+      Month mapping:
+        jan/january=01, feb/february=02, mar/march=03, apr/april=04,
+        may=05, jun/june=06, jul/july=07, aug/august=08,
+        sep/sept/september=09, oct/october=10, nov/november=11, dec/december=12
+
+    C) This month / last month
+      "this month"
+        → keep records where date starts with TODAY's "YYYY-MM"
+      "last month"
+        → compute previous month relative to TODAY (handle Jan → Dec prev year)
+        → keep records where date starts with previous "YYYY-MM"
+
+    D) This year
+      "this year"
+        → keep records where date starts with TODAY's "YYYY-"
+
+    E) Rolling window
+      "last N days" where N is 30/60/90 (or any integer)
+        → keep records where date >= (TODAY - N days)
+
+    F) Explicit range (if NOTE contains "from" / "between" / "to")
+      Examples:
+        "from 2026-01-01 to 2026-01-31"
+        "between 01 jan 2026 and 31 jan 2026"
+      If you can parse two endpoints:
+        → keep records where start_date <= date <= end_date
+      If parsing fails:
+        → ignore this rule and fallback to other date rules.
+
+    G) Quarters
+      "q1 YYYY" → months 01-03
+      "q2 YYYY" → months 04-06
+      "q3 YYYY" → months 07-09
+      "q4 YYYY" → months 10-12
+        → keep records where date starts with YYYY- and month in that quarter
+
+    H) Financial year (India-style)
+      "fy YYYY-YY" or "fy YYYY-YYYY" or "financial year YYYY-YY"
+      Examples: "fy 2025-26", "financial year 2024-2025"
+        → interpret FY 2025-26 as 2025-04-01 through 2026-03-31
+        → keep records where date is within that range
+
+    Precedence:
+      1) Explicit range (F) if confidently parsed
+      2) Month+year (B)
+      3) Quarter (G)
+      4) Year-only (A)
+      5) This/last month/year (C/D)
+      6) Rolling window (E)
+      7) Otherwise → keep all
 
   By status: NOTE mentions payment context
-    "pending/outstanding/to receive/to collect/unpaid/ageing"
-      → keep only balance > 0 AND status NOT IN [paid, void, Paid, Void]
-    "paid"    → keep only status in [paid, Paid]
-    "overdue" → keep only due_date < TODAY
-    no status context → keep all
+    "pending/outstanding/to receive/to collect/unpaid/ageing/aging"
+      → keep only records where balance > 0 AND status NOT IN [paid, void, Paid, Void]
+    "paid"
+      → keep only status in [paid, Paid]
+    "overdue"
+      → keep only records where due_date < TODAY (if due_date exists)
+    no status context
+      → keep all
 
 STEP 2 — COMPUTE from filtered records:
 
@@ -1281,10 +1347,15 @@ async def execute_step(
     result_data = _parse_mcp_result(result)
 
     if _is_pageable(tool_name) and _has_more_pages(result_data):
-        result_data["__paginate__"] = {
-            "tool":   tool_name,
-            "args":   args,
-            "page1":  True,
+        if _is_pageable(tool_name) and _has_more_pages(result_data):
+    result_data = await _autopaginate(
+        session=session,
+        tool_name=tool_name,
+        base_args=args,
+        first_result=result_data,
+        audit=audit,
+        correlation_id=correlation_id,
+    )
         }
 
     add_memory(memory, {
@@ -1590,6 +1661,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
