@@ -108,6 +108,70 @@ def _setup_logging() -> logging.Logger:
 
 log = _setup_logging()
 
+def _resolve_value(template: str, step_results: list[Any]) -> Any:
+    """
+    Resolve a template string like "{{steps[0].contacts[0].contact_id}}"
+    against the list of previous step results.
+
+    Returns the resolved value, or the original string if it can't resolve.
+    """
+    match = re.fullmatch(r'\{\{(.+?)\}\}', template.strip())
+    if not match:
+        return template
+
+    path = match.group(1).strip()
+    # path looks like: steps[0].contacts[0].contact_id
+    # or:              steps[0].invoices[0].invoice_id
+
+    # Parse the path into tokens
+    # e.g. ["steps[0]", "contacts[0]", "contact_id"]
+    tokens = path.split('.')
+    current: Any = {"steps": step_results}
+
+    for token in tokens:
+        # Handle array indexing: token = "steps[0]" or "contacts[0]"
+        arr_match = re.fullmatch(r'(\w+)\[(\d+)\]', token)
+        try:
+            if arr_match:
+                key, idx = arr_match.group(1), int(arr_match.group(2))
+                if isinstance(current, dict):
+                    current = current[key][idx]
+                elif isinstance(current, list):
+                    current = current[int(idx)]
+            else:
+                if isinstance(current, dict):
+                    current = current[token]
+                elif isinstance(current, list):
+                    current = current[int(token)]
+        except (KeyError, IndexError, TypeError, ValueError):
+            # Path doesn't resolve — return original template so the
+            # error surfaces clearly rather than silently passing None
+            return template
+
+    return current
+
+
+def _resolve_args(args: dict, step_results: list[Any]) -> dict:
+    """
+    Walk all args and resolve any {{...}} template values.
+    Handles nested dicts and lists recursively.
+    """
+    resolved = {}
+    for k, v in args.items():
+        if isinstance(v, str) and '{{' in v:
+            resolved[k] = _resolve_value(v, step_results)
+        elif isinstance(v, dict):
+            resolved[k] = _resolve_args(v, step_results)
+        elif isinstance(v, list):
+            resolved[k] = [
+                _resolve_value(item, step_results) if isinstance(item, str) and '{{' in item
+                else item
+                for item in v
+            ]
+        else:
+            resolved[k] = v
+    return resolved
+
 # ---------------------------------------------------------------------------
 # Audit logger
 # ---------------------------------------------------------------------------
@@ -508,121 +572,30 @@ def add_memory(
 # Planner
 # ---------------------------------------------------------------------------
 PLANNER_SYSTEM = """
-You are a Zoho Books automation agent. You decide which MCP tools to call and with what arguments.
+You are a Zoho Books agent. Analyse the user's intent and produce a JSON execution plan.
 
-INPUT (JSON):
-  TOOLBOX  — tool_name → {desc, required, allowed, schema, read_only}
-  STATE    — persisted values (organization_id, pending_intent, etc.)
-  MEMORY   — recent tool call history (results are summarised, not full)
-  USER     — the user's latest message
+OUTPUT — valid JSON only, one of:
+  {"type":"ask","text":"...","save":{}}
+  {"type":"plan","steps":[{"tool":"...","args":{...},"note":"...","parallel":false}]}
+  {"type":"confirm","text":"...","on_yes":{...},"on_no":{...}}
 
-CORE RULES:
-1. NEVER invent or guess IDs. Look them up first if not in STATE or MEMORY.
-2. Only use argument keys present in a tool's "allowed" list.
-3. STATE.organization_id is always set — inject it automatically; never ask for it.
-4. For body/JSONString fields, pass valid JSON constructed from context.
-5. When MEMORY contains a schema_error, fix using only allowed keys.
-6. Never ask "What would you like to do?" mid-workflow.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PAGINATION — MANDATORY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- ALWAYS pass per_page=200 on every list/search call.
-- Never set page=2 — system auto-fetches remaining pages.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DATE FILTERS — exact Zoho format required
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Zoho requires date_start and date_end as separate args in YYYY-MM-DD format.
-NEVER pass a single "date" or "year" argument — it will error.
-
-  User says "in 2026"          → date_start="2026-01-01", date_end="2026-12-31"
-  User says "in 2025"          → date_start="2025-01-01", date_end="2025-12-31"
-  User says "this month"       → date_start="<first day of current month>", date_end="<today>"
-  User says "last month"       → date_start="<first day of last month>", date_end="<last day of last month>"
-  User says "this year"        → date_start="<Jan 1 of current year>", date_end="<today>"
-  User says "last 30 days"     → date_start="<today minus 30 days>", date_end="<today>"
-  User says "between X and Y"  → date_start="X in YYYY-MM-DD", date_end="Y in YYYY-MM-DD"
-  No date mentioned            → omit both date_start and date_end entirely
-
-Today's date for reference: use the most recent date you know is accurate.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CUSTOMER / VENDOR FILTERS — always filter at API level
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-When the user asks about a SPECIFIC customer or vendor:
-- NEVER fetch all records and filter later — this wastes tokens and is slow
-- ALWAYS use the most specific tool available:
-
-  Step 1: If you don't have the contact_id, call list_contacts or search_contacts
-          with contact_name="<name>" to find the contact_id first.
-          Then use that contact_id in the invoice/bill query.
-
-  Step 2: Call list_invoices or list_bills with:
-          contact_id="<id from step 1>", per_page=200
-
-  If the tool allows customer_name directly, use:
-          customer_name="<exact name>", per_page=200
-
-  Example:
-    User: "invoices for Punjab National Bank"
-    → Step 1: search_contacts(contact_name="Punjab National Bank", per_page=200)
-    → Step 2: list_invoices(contact_id="<id>", per_page=200)
-    → note: "Show all invoices for Punjab National Bank"
-
-  Example:
-    User: "total amount to collect from Punjab National Bank"
-    → Step 1: search_contacts(contact_name="Punjab National Bank", per_page=200)
-    → Step 2: list_invoices(contact_id="<id>", per_page=200)
-    → note: "Compute total outstanding balance to be collected from Punjab National Bank"
-
-  Example:
-    User: "invoices for Punjab National Bank in 2026"
-    → Step 1: search_contacts(contact_name="Punjab National Bank", per_page=200)
-    → Step 2: list_invoices(contact_id="<id>", date_start="2026-01-01", date_end="2026-12-31", per_page=200)
-    → note: "Show invoices for Punjab National Bank created in 2026"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STATUS FILTERS — strict rules
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ONLY pass a status filter when one of these conditions is met:
-  - User explicitly says "paid" invoices/bills   → status="paid"
-  - User explicitly says "draft" invoices         → status="draft"
-  - User explicitly says "void"                   → status="void"
-  - User explicitly says "overdue"                → status="overdue"
-  - Any other case (pending, outstanding, unpaid, ageing, total) → NO status filter
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-QUESTION TYPE → TOOL STRATEGY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"Total / sum / how much / count" for a specific customer/vendor:
-  → filter by contact_id + per_page=200, set note to user's exact question
-  → summarizer will compute the total
-
-"List / show / get" for a specific customer/vendor:
-  → filter by contact_id + per_page=200
-  → summarizer will show a table
-
-"Ageing analysis" (all customers/vendors):
-  → list_invoices(per_page=200) or list_bills(per_page=200), NO other filters
-  → note: "Ageing analysis grouped by customer/vendor with buckets 0-30, 31-60, 61-90, 90+ days"
-
-"All invoices / all bills" (no customer specified):
-  → list_invoices(per_page=200), no filters
-  → summarizer shows full table
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT — valid JSON only, no prose
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-A) Ask user for missing info:
-{"type":"ask","text":"<question>","save":{"key":"value"}}
-
-B) Execute tool steps:
-{"type":"plan","steps":[{"tool":"ToolName","args":{...},"note":"<user's exact question>","parallel":false},...]}
-
-C) Confirm before risky action:
-{"type":"confirm","text":"<description>","on_yes":{"type":"plan","steps":[...]},"on_no":{"type":"ask","text":"..."}}
+RULES:
+1. Read the TOOLBOX carefully. Each tool's schema tells you exactly what args it accepts.
+2. Always inject organization_id from STATE into every tool call.
+3. Always pass per_page=200 on every list or search call.
+4. Never pass status filter unless the user explicitly named a status (paid/draft/void/overdue).
+5. For date ranges: always use two separate args — date_start and date_end — in YYYY-MM-DD.
+   Never pass a single "date", "year", or "month" argument.
+6. When a tool needs an ID (contact_id, invoice_id, item_id etc.) that you don't have
+   in STATE or MEMORY, add a prior step to look it up first.
+7. Reference prior step output in later step args using: {{steps[N].field.path}}
+   where N is the zero-based step index. Example:
+     Step 0 returns: {"contacts": [{"contact_id": "123", "contact_name": "Acme"}]}
+     Step 1 arg:     "contact_id": "{{steps[0].contacts[0].contact_id}}"
+8. Set "note" to the user's exact question — the summarizer uses it to decide
+   what to compute and what format to return.
+9. For risky operations (delete, void, refund, create payment): use type "confirm".
+10. For independent read-only steps: set "parallel": true to run them concurrently.
 """.strip()
 
 
@@ -1366,43 +1339,70 @@ async def execute_step(
 
 
 async def execute_plan(
-    session: ClientSession,
-    toolbox: dict[str, ToolMeta],
-    state: AgentState,
-    memory: list[dict],
-    audit: AuditLog,
-    gemini: genai.Client,
+    session,           # ClientSession
+    toolbox: dict,
+    state,             # AgentState
+    memory: list,
+    audit,             # AuditLog
+    gemini,            # genai.Client
     steps: list[dict],
     correlation_id: str,
 ) -> tuple[bool, Optional[Any]]:
+    """
+    Execute a plan's steps sequentially (or in parallel batches).
+    Resolves {{steps[N].field.path}} references between steps.
+    """
     last_result: Optional[Any] = None
+    step_results: list[Any] = []   # stores each step's result for chaining
 
     i = 0
     while i < len(steps):
         step = steps[i]
+
+        # ── Resolve any template references in args ───────────────────
+        if step_results:  # only resolve if there are previous results
+            original_args = step.get("args") or {}
+            resolved_args = _resolve_args(original_args, step_results)
+            if resolved_args != original_args:
+                step = {**step, "args": resolved_args}
+
+        # ── Parallel batch ────────────────────────────────────────────
         if step.get("parallel"):
             batch = [step]
             j = i + 1
             while j < len(steps) and steps[j].get("parallel"):
-                batch.append(steps[j])
+                # Resolve parallel steps too
+                ps = steps[j]
+                if step_results:
+                    resolved = _resolve_args(ps.get("args") or {}, step_results)
+                    if resolved != (ps.get("args") or {}):
+                        ps = {**ps, "args": resolved}
+                batch.append(ps)
                 j += 1
+
+            import asyncio
             tasks = [
                 execute_step(session, toolbox, state, memory, audit, s, correlation_id, gemini)
                 for s in batch
             ]
-            for (ok, rdata), s in zip(await asyncio.gather(*tasks), batch):
+            results = await asyncio.gather(*tasks)
+            for (ok, rdata), s in zip(results, batch):
                 if not ok:
                     return False, None
                 last_result = rdata
+                step_results.append(rdata)
             i = j
             continue
 
+        # ── Sequential step ───────────────────────────────────────────
         ok, rdata = await execute_step(
             session, toolbox, state, memory, audit, step, correlation_id, gemini
         )
         if not ok:
             return False, None
+
         last_result = rdata
+        step_results.append(rdata)
         i += 1
 
     return True, last_result
@@ -1628,6 +1628,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
