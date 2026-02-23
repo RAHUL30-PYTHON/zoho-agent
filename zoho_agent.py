@@ -313,65 +313,20 @@ class AgentState:
 
 def _slim_memory_for_planner(memory_entries: list) -> list:
     """
-    Strips large 'result' values from memory entries before sending to the
-    Gemini planner — but PRESERVES all entity IDs, names, and key values
-    needed for chained operations and context continuity.
+    Prepare memory entries for the planner context window.
 
-    FIX over original: The original stripped too aggressively and lost entity
-    IDs (contact_id, invoice_id, etc.) that are needed for follow-up queries.
-    Now we keep a richer set of fields from sample records.
+    Since add_memory now stores compact summaries (not raw result arrays),
+    entries are already small enough to send as-is. We just pass them
+    through, dropping any oversized fields defensively.
     """
-    # Fields that are always worth keeping for context continuity
-    _CONTEXT_FIELDS = frozenset({
-        "invoice_number", "bill_number", "contact_name", "customer_name",
-        "vendor_name", "invoice_id", "bill_id", "contact_id", "item_id",
-        "name", "total", "balance", "status", "date", "due_date",
-        "payment_number", "amount", "email", "phone", "company_name",
-        "estimate_number", "salesorder_number", "purchaseorder_number",
-        "creditnote_number", "expense_id", "account_id", "account_name",
-        "payment_id", "reference_number", "currency_code",
-    })
-
     slimmed = []
     for entry in memory_entries:
         if not isinstance(entry, dict):
             slimmed.append(entry)
             continue
-
-        e = dict(entry)
-
-        if "result" in e and isinstance(e["result"], dict):
-            result = e["result"]
-
-            # Find the largest list in the result (the records array)
-            best_key, best_arr = "", []
-            for k, v in result.items():
-                if isinstance(v, list) and len(v) > len(best_arr):
-                    best_key, best_arr = k, v
-
-            if len(best_arr) > 5:
-                # Keep up to 8 sample records (up from 3) so follow-up
-                # queries have enough entity IDs to work with
-                sample = best_arr[:8]
-                clean_sample = []
-                for rec in sample:
-                    if isinstance(rec, dict):
-                        clean_sample.append({
-                            k: v for k, v in rec.items()
-                            if k in _CONTEXT_FIELDS
-                        })
-                    else:
-                        clean_sample.append(rec)
-
-                e["result"] = {
-                    "__slimmed__":    True,
-                    "record_count":   len(best_arr),
-                    "record_key":     best_key,
-                    "sample_records": clean_sample,
-                    **({"page_context": result["page_context"]}
-                       if "page_context" in result else {}),
-                }
-
+        # Entries already have result_summary (compact) instead of result (raw).
+        # Drop any stale raw "result" key if somehow still present.
+        e = {k: v for k, v in entry.items() if k != "result"}
         slimmed.append(e)
     return slimmed
 
@@ -453,25 +408,30 @@ def _estimate_tokens(obj: Any) -> int:
 
 MEMORY_SUMMARIZE_SYSTEM = """
 You are a memory compressor for a Zoho Books AI agent.
-You will receive a list of past tool call records (tool name, args, result, errors).
+You receive compact tool-call summaries (tool name, args, result_summary with record counts
+and sample IDs, errors). Raw result arrays are never stored in memory.
 
-CRITICAL: Preserve ALL entity IDs and names — they are needed for follow-up queries.
-Produce a compact JSON object with every fact the agent needs to continue the conversation.
+Produce a single compact JSON with the key facts needed to continue the conversation.
+Preserve all entity IDs and numbers — they are needed for single-entity follow-up queries.
 
-Return ONLY this JSON shape — no prose, no markdown:
+Return ONLY this JSON — no prose, no markdown:
 {
   "type": "summary",
-  "covers_entries": <integer count of entries summarised>,
-  "facts": {
-    "invoices":   [{"id": "...", "number": "...", "customer": "...", "total": ..., "balance": ..., "status": "..."}, ...],
-    "bills":      [{"id": "...", "number": "...", "vendor": "...", "total": ..., "status": "..."},   ...],
-    "contacts":   [{"id": "...", "name": "...", "email": "...", "type": "..."},                      ...],
-    "items":      [{"id": "...", "name": "...", "rate": ...},                                        ...],
-    "payments":   [{"id": "...", "number": "...", "amount": ..., "customer": "..."},                 ...],
-    "other":      [{"entity": "...", "id": "...", "key_fields": {}},                                 ...],
-    "actions_taken": ["<verb> <entity_type> <id_or_name>", ...],
-    "errors":        ["<brief description>", ...]
-  }
+  "covers_entries": <count>,
+  "entity_ids": {
+    "invoices":  [{"invoice_id":"...","invoice_number":"...","customer_name":"..."},...],
+    "bills":     [{"bill_id":"...","bill_number":"...","vendor_name":"..."},...],
+    "contacts":  [{"contact_id":"...","contact_name":"...","email":"..."},...],
+    "items":     [{"item_id":"...","name":"..."},...],
+    "other":     [{"entity":"...","id":"..."}]
+  },
+  "last_fetch": {
+    "tool": "<tool_name>",
+    "record_count": <N>,
+    "note": "<what was asked>"
+  },
+  "actions_taken": ["<verb> <entity> <id_or_number>", ...],
+  "errors": ["<brief>", ...]
 }
 """.strip()
 
@@ -505,27 +465,68 @@ def add_memory(
     gemini_client=None,
     cid: str = "",
 ):
-    memory.append(entry)
+    """
+    Store a CONVERSATION-LEVEL memory entry.
 
-    # Trim large raw results in memory to control token usage —
-    # but only AFTER the result has already been used for summarization.
-    # Keep up to 10 records (up from 5) so chained queries can reference IDs.
-    last = memory[-1]
-    if isinstance(last, dict) and "result" in last and isinstance(last["result"], dict):
-        result = last["result"]
+    Architecture (new):
+    - Memory stores WHAT WAS ASKED and WHAT WAS FOUND (counts, IDs, names).
+    - Memory does NOT store raw API result arrays — those are too large and
+      cause the "only 10 records" problem where trimmed samples were reused.
+    - Fresh data is ALWAYS fetched from MCP when a query needs it.
+    - The planner uses memory only to know: what entities exist, what IDs
+      were seen, what was done, and what errors occurred.
+
+    Entry shapes stored:
+      Tool call:   {"tool": "...", "args": {...}, "record_count": N,
+                    "entity_ids": [...], "error": "..." (if failed)}
+      User turn:   {"role": "user", "content": "..."}
+      Bot turn:    {"role": "assistant", "summary": "...", "tool": "..."}
+      Error:       {"error": "...", "tool": "..."}
+    """
+    # If this is a tool-result entry, strip the raw result array and keep
+    # only a compact summary (record count + a few IDs for chaining).
+    if isinstance(entry, dict) and "result" in entry and isinstance(entry.get("result"), dict):
+        result = entry["result"]
         best_key, best_arr = "", []
         for k, v in result.items():
             if isinstance(v, list) and len(v) > len(best_arr):
                 best_key, best_arr = k, v
-        if len(best_arr) > 10:
-            # Keep the first 10 records for ID-chaining, trim the rest
-            last["result"] = {
-                "__trimmed__":  True,
-                "record_count": len(best_arr),
-                "record_key":   best_key,
-                "sample":       best_arr[:10],  # kept for follow-up queries
-            }
 
+        # Build a compact summary instead of storing the raw array
+        compact: dict = {}
+        if best_arr:
+            compact["record_count"] = len(best_arr)
+            compact["record_key"]   = best_key
+            # Keep up to 5 IDs/names so the planner can reference them
+            id_fields = ("invoice_id","bill_id","contact_id","item_id",
+                         "payment_id","expense_id","estimate_id",
+                         "salesorder_id","purchaseorder_id","creditnote_id")
+            name_fields = ("invoice_number","bill_number","contact_name",
+                           "customer_name","vendor_name","name","number")
+            samples = []
+            for rec in best_arr[:5]:
+                if not isinstance(rec, dict):
+                    continue
+                s = {}
+                for f in (*id_fields, *name_fields, "total", "balance", "status"):
+                    if f in rec:
+                        s[f] = rec[f]
+                if s:
+                    samples.append(s)
+            if samples:
+                compact["sample_ids"] = samples
+        else:
+            # Single-record result (get_invoice etc.) — keep key fields
+            compact = {k: v for k, v in result.items()
+                       if not isinstance(v, (list, dict)) and k not in
+                       ("organization_id","template_id","color_code")}
+
+        entry = {k: v for k, v in entry.items() if k != "result"}
+        entry["result_summary"] = compact
+
+    memory.append(entry)
+
+    # Trim old entries to stay within token budget
     total_tokens = sum(_estimate_tokens(m) for m in memory)
     over_entries = len(memory) > MAX_MEMORY_ENTRIES
     over_tokens  = total_tokens > MAX_MEMORY_TOKENS
@@ -533,21 +534,7 @@ def add_memory(
     if not (over_entries or over_tokens):
         return None
 
-    if gemini_client is not None:
-        split        = len(memory) // 2
-        to_summarize = memory[:split]
-        del memory[:split]
-
-        async def _do_summarize() -> None:
-            summary = await summarize_memory_async(gemini_client, to_summarize, cid)
-            memory.insert(0, summary)
-
-        try:
-            task = asyncio.get_running_loop().create_task(_do_summarize())
-            return task
-        except RuntimeError:
-            pass
-
+    # Trim oldest entries first (keep most recent context)
     while len(memory) > max(4, MAX_MEMORY_ENTRIES):
         memory.pop(0)
     while len(memory) > 4 and sum(_estimate_tokens(m) for m in memory) > MAX_MEMORY_TOKENS:
@@ -581,85 +568,82 @@ def add_memory(
 # - Better handling of multi-step plans with dependency references
 
 PLANNER_SYSTEM = """
-You are a Zoho Books agent planner. Given a user request, MEMORY of past results,
-and a TOOLBOX, produce a JSON execution plan.
+You are a Zoho Books agent planner. Given a user request, MEMORY of past
+conversation context, and a TOOLBOX, produce a JSON execution plan.
 
-OUTPUT FORMAT - return exactly ONE of these JSON shapes:
+MEMORY contains compact summaries of past tool calls — record counts,
+sample IDs, and what actions were taken. It does NOT contain raw data.
+All raw data must be fetched fresh from the MCP tools when needed.
+
+==============================================
+OUTPUT FORMAT — return exactly ONE JSON shape:
+==============================================
 
   Ask for missing info:
     {"type":"ask","text":"<question>","save":{}}
 
   Execute tools:
-    {"type":"plan","steps":[{"tool":"<n>","args":{...},"note":"<user question verbatim>"}]}
+    {"type":"plan","steps":[{"tool":"<name>","args":{...},"note":"<user question verbatim>"}]}
 
-  Confirm before executing risky tools (delete/void/refund):
+  Confirm risky operations (delete/void/refund/send):
     {"type":"confirm","text":"<what will happen>","on_yes":{...plan...},"on_no":{...}}
 
-  Use cached data - NO API call needed:
-    {"type":"plan","steps":[{"tool":"__memory__","args":{},"note":"<user question verbatim>"}]}
+========================================
+TOOL SELECTION — follow this hierarchy:
+========================================
 
-===========================================================
-STEP 0 - CHECK MEMORY BEFORE PLANNING (always do this first)
-===========================================================
+1. SINGLE ENTITY — user names a specific record by ID or number:
+   → Check MEMORY for the ID (result_summary.sample_ids)
+   → If found: use get_<entity> directly with that ID
+   → If not found: use search_<entity> to find it first
+   → NEVER use list_<entity> when you only need one record
 
-Look at MEMORY for the most recent successful tool result.
+2. LISTING / FILTERING / AGGREGATION — user wants a set or a total:
+   → ALWAYS fetch fresh: use list_<entity> with per_page=200
+   → Do NOT pass filter params to Zoho (date, customer_name, status, etc.)
+   → The summarizer receives the full result and applies all filters
+   → This applies even if the same entity was listed in a previous turn —
+     always re-fetch to get accurate, complete data
+   → Exception: if MEMORY shows the previous turn listed the same entity
+     AND the user is refining (e.g. "now filter that for January") AND
+     the session is less than 5 minutes old — you MAY re-use by adding
+     a note "REUSE_LAST_RESULT" to the step (server handles it)
 
-USE __memory__ (skip the API call) when ALL of these are true:
-  1. MEMORY has a recent result from a list_* tool (list_invoices, list_bills, etc.)
-  2. The new question is about the SAME entity type (invoices->invoices, bills->bills)
-  3. The new question is a follow-up: filter, total, aggregate, count, or "from X"
+3. SEARCH BY NAME — user mentions a customer/vendor without an ID:
+   → Search memory first for a matching contact_id
+   → If not in memory, use search_contacts to get the contact_id
 
-EXAMPLES - use __memory__, do NOT call an API tool:
-  Previous turn called list_invoices -> got invoices in memory
-  User: "tell me total amount i will receive from punjab national bank" -> __memory__
-  User: "how many are overdue"                                          -> __memory__
-  User: "total outstanding"                                             -> __memory__
-  User: "filter for january 2026"                                       -> __memory__
-  User: "show only paid invoices"                                       -> __memory__
-  User: "what is the total balance"                                     -> __memory__
+4. MULTI-STEP — chain results between steps:
+   → Use {{steps[N].field_name}} to reference earlier step results
 
-EXAMPLES - must fetch fresh, do NOT use __memory__:
-  User: "show bills" (different entity)           -> list_bills
-  User: "refresh" / "reload" / "get latest"       -> list_invoices fresh
-  User: "get invoice #INV-999" (specific entity)  -> get_invoice
-  MEMORY is empty or contains only errors         -> fetch fresh
+5. PAGINATION — always include per_page=200 in list_* calls.
 
-The __memory__ sentinel tells the summarizer to use the last successful
-list result from MEMORY. No MCP tool call is made.
+================================
+WHEN TO FETCH VS WHEN TO REUSE:
+================================
 
-==========================================
-STEP 1 - TOOL SELECTION (if not __memory__)
-==========================================
+ALWAYS FETCH FRESH:
+  - "total amount from punjab national bank" after listing invoices
+    → re-fetch list_invoices (the previous list was trimmed in memory,
+      fresh fetch guarantees all records are included)
+  - Any aggregate or filter query on a large dataset
+  - First time asking about an entity type
 
-1. SINGLE ENTITY (user names a specific record by ID or number):
-   -> Use get_<entity> if the ID is in MEMORY
-   -> Use search_<entity> if you need to find it first
-   -> NEVER use list_<entity> for a single record
-
-2. LISTING / FILTERING / TOTALS (user wants a set of records):
-   -> ALWAYS use list_<entity> with per_page=200
-   -> Do NOT add filter params (status, date, customer_name, etc.)
-   -> The summarizer filters from the full result
-
-3. SEARCH BY NAME (no ID known):
-   -> Use search_contacts first to get the contact_id if needed
-
-4. MULTI-STEP CHAINS:
-   -> Reference earlier step results with {{steps[N].field_name}}
-
-5. PAGINATION: Always include per_page=200 in list_* calls.
+USE MEMORY IDs (skip list, use get_<entity>):
+  - "get details for INV-001" → get_invoice with invoice_id from memory
+  - "update that contact" → get contact_id from memory
+  - "void invoice #INV-123" → find invoice_id in memory
 
 ============================
 ARGUMENT CONSTRUCTION RULES:
 ============================
 
-* Check the schema "required" field - include every required arg.
-* organization_id is almost always required - take it from STATE.
-* Some tools need a "body" or "JSONString" wrapper - check schema.
+* Check schema "required" — include every required arg.
+* organization_id is almost always required — take from STATE.
+* Some tools need a "body" or "JSONString" wrapper — check schema.
 * Never invent arg names not in "allowed".
 * Set "note" to the user's exact question verbatim.
 """.strip()
-
 
 
 def _slim_toolbox(toolbox: dict[str, ToolMeta], user_msg: str, memory: list[dict]) -> dict:
@@ -1341,30 +1325,6 @@ async def execute_step(
     tool_name: str = step.get("tool", "")
     args: dict     = dict(step.get("args") or {})
 
-    # __memory__ sentinel: reuse last successful list_* result from memory.
-    # The planner uses this for follow-up filter/aggregate queries so we
-    # don't make unnecessary API calls that can fail or hit rate limits.
-    if tool_name == "__memory__":
-        for entry in reversed(memory):
-            if not isinstance(entry, dict):
-                continue
-            if "error" in entry or "schema_error" in entry:
-                continue
-            result = entry.get("result")
-            if not result or not isinstance(result, dict):
-                continue
-            entry_tool = entry.get("tool", "")
-            if "list_" in entry_tool or "get_" in entry_tool:
-                log.info("memory_reuse", extra={
-                    "cid": correlation_id, "source_tool": entry_tool,
-                })
-                return True, result
-        msg = "No cached data in memory. Please fetch fresh data first."
-        add_memory(memory, {"error": msg, "tool": "__memory__", "cid": correlation_id},
-                   gemini_client, correlation_id)
-        log.warning("memory_reuse_miss", extra={"cid": correlation_id})
-        return False, None
-
     if not tool_name or tool_name not in toolbox:
         msg = f"Unknown tool: '{tool_name}'"
         add_memory(memory, {"error": msg, "step": step, "cid": correlation_id},
@@ -1443,10 +1403,13 @@ async def execute_step(
             "page1":  True,
         }
 
+    # Store a compact conversation entry — NOT the raw result array.
+    # add_memory will extract record_count + sample_ids from result_data.
     add_memory(memory, {
         "tool":      tool_name,
-        "args":      {k: args[k] for k in list(args)[:12]},
-        "result":    result_data,
+        "args":      {k: args[k] for k in list(args)[:8]
+                      if k not in ("organization_id",)},
+        "result":    result_data,   # add_memory strips this to a compact summary
         "elapsed_s": elapsed,
         "cid":       correlation_id,
     }, gemini_client, correlation_id)
