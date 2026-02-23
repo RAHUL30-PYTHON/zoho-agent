@@ -15,7 +15,7 @@ import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Any, Optional
 
@@ -980,8 +980,8 @@ async def gemini_summarize(
 ) -> str:
     result_str = _safe_result_str(result)
     prompt = (
-        f"USER_QUESTION: {user_question or '(not specified — use best judgement on format)'}\n"
         f"TODAY: {date.today().isoformat()}\n"
+        f"USER_QUESTION: {user_question or '(not specified — use best judgement on format)'}\n"
         f"TOOL: {tool}\n"
         f"ARGS: {json.dumps(args, default=str)}\n"
         f"RESULT: {result_str}"
@@ -1595,6 +1595,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
