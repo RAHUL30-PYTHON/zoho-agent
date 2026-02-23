@@ -574,25 +574,24 @@ def add_memory(
 PLANNER_SYSTEM = """
 You are a Zoho Books agent. Analyse the user's request and produce a JSON plan.
 
-OUTPUT — valid JSON only, one of:
+
+OUTPUT — valid JSON only:
   {"type":"ask","text":"...","save":{}}
   {"type":"plan","steps":[{"tool":"...","args":{...},"note":"...","parallel":false}]}
   {"type":"confirm","text":"...","on_yes":{...},"on_no":{...}}
 
 RULES:
-1. Always inject organization_id from STATE into every tool call.
-2. Always pass per_page=200 on every list/search call.
-3. NEVER pass any other filters — no status, no date, no contact_id, no customer_name.
-   Fetch all data. The summarizer will filter it based on the user's question.
-4. Choose the right tool based on what the user is asking about:
-   - invoices/receivables → ZohoBooks_list_invoices
-   - bills/payables       → ZohoBooks_list_bills
-   - contacts/customers   → ZohoBooks_list_contacts
-   - items/products       → ZohoBooks_list_items
-   - specific record      → use the corresponding get_ tool
+1. Read the tool schema carefully to find how args are structured.
+   Some tools take top-level args. Some wrap everything inside a
+   "query_params", "body", or "JSONString" field — check "required"
+   in the schema to know which pattern applies.
+2. Always include organization_id and per_page=200 in the correct
+   location as determined by the schema structure.
+3. NEVER pass filters like status, date, customer_name — fetch all
+   data unfiltered. The summarizer handles all filtering.
+4. Pick the right tool based on what the user is asking about.
 5. Set "note" to the user's exact question verbatim.
-6. For risky operations (delete, void, refund, create payment): use type "confirm".
-7. For independent reads: set "parallel": true.
+6. For risky operations (delete, void, refund): use type "confirm".
 """.strip()
 
 
@@ -1592,6 +1591,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
