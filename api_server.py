@@ -8,7 +8,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from typing import Any, AsyncIterator, Optional
 
 import httpx
@@ -346,7 +346,7 @@ async def api_summarize(
         return {"format": "status", "ok": True, "headline": cleaned or "Done.", "detail": ""}
 
 
-# ── Per-entity preferred column lists ───────────────────────────────────────
+# ── Per-entity preferred column lists ────────────────────────────────────────
 _ENTITY_COLS: dict[str, list[str]] = {
     "invoice":       ["invoice_number","customer_name","date","due_date","total","balance","status","due_days"],
     "bill":          ["bill_number","vendor_name","date","due_date","total","balance","status","due_days"],
@@ -414,11 +414,6 @@ def _compute_totals(records: list) -> dict[str, float]:
     return totals
 
 
-def _count_records(result: Any) -> int:
-    _, records = _extract_records(result) if isinstance(result, dict) else ("", [])
-    return len(records)
-
-
 def _records_to_rows(records: list, tool_name: str = "") -> dict:
     cols = _detect_cols(records, tool_name)
     rows = [[str(rec.get(c, "")) for c in cols] for rec in records if isinstance(rec, dict)]
@@ -426,11 +421,22 @@ def _records_to_rows(records: list, tool_name: str = "") -> dict:
 
 
 def _build_table_structured(result: Any, tool_name: str,
-                             more_pages: bool = False) -> dict:
-    _, records = _extract_records(result) if isinstance(result, dict) else ("", [])
+                             more_pages: bool = False,
+                             records_override: Optional[list] = None) -> dict:
+    """
+    Build a table structured response.
+    If records_override is provided, use those records instead of extracting from result.
+    This allows pre-filtered records to be used directly.
+    """
+    if records_override is not None:
+        records = records_override
+    else:
+        _, records = _extract_records(result) if isinstance(result, dict) else ("", [])
+
     if not records:
         return {"format": "status", "ok": False, "headline": "No records found.",
                 "detail": f"Tool: {tool_name}"}
+
     count    = len(records)
     totals   = _compute_totals(records)
     col_info = _records_to_rows(records, tool_name)
@@ -455,7 +461,9 @@ def _build_table_structured(result: Any, tool_name: str,
 
 
 def _fast_fallback_summary(result: Any, tool_name: str) -> str:
-    return json.dumps(_build_table_structured(result, tool_name))
+    s = _build_table_structured(result, tool_name)
+    s.pop("col_keys", None)
+    return json.dumps(s)
 
 
 def structured_to_markdown(data: dict) -> str:
@@ -641,7 +649,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Zoho Books Agent API",
-    version="2.2.0",
+    version="2.3.0",
     description="AI-powered Zoho Books assistant (Gemini + MCP, per-session MCP URL + Org ID)",
     lifespan=lifespan,
 )
@@ -735,17 +743,218 @@ async def confirm(req: ConfirmRequest) -> ChatResponse:
 
 
 # ---------------------------------------------------------------------------
-# Helpers to classify whether a result should be a table or a computed answer
+# FIX 1: Python-side filter for name / date / status
 # ---------------------------------------------------------------------------
+# This runs entirely in Python before Gemini is ever called.
+# It handles the "give me invoices of X for January 2026" case that was
+# causing Gemini to say "I will filter and get back to you" — because
+# Gemini was only seeing 3 sample records (not the full filtered list).
 
-# Keywords that indicate the user wants a computed/aggregated answer, not a table
-_AGGREGATION_KEYWORDS = frozenset({
-    "total", "sum", "how many", "count", "average", "amount",
-    "what is", "tell me", "calculate", "add up", "how much",
+_MONTH_MAP: dict[str, str] = {
+    "january":"01","february":"02","march":"03","april":"04",
+    "may":"05","june":"06","july":"07","august":"08",
+    "september":"09","october":"10","november":"11","december":"12",
+    "jan":"01","feb":"02","mar":"03","apr":"04","jun":"06",
+    "jul":"07","aug":"08","sep":"09","oct":"10","nov":"11","dec":"12",
+}
+
+_NAME_FIELDS    = ("customer_name", "vendor_name", "contact_name", "display_name", "name")
+_DATE_FIELDS    = ("date", "invoice_date", "bill_date", "expense_date", "transaction_date")
+_BALANCE_FIELDS = ("balance", "balance_due", "amount_due")
+
+# Words to strip when extracting a company name from the user query
+_QUERY_STOPWORDS: frozenset[str] = frozenset({
+    "give","me","the","of","for","in","list","show","get","all",
+    "invoices","invoice","bills","bill","payments","payment","expenses",
+    "expense","contacts","contact","items","item","filter","and","from",
+    "to","with","that","by","on","a","an","is","are","january","february",
+    "march","april","may","june","july","august","september","october",
+    "november","december","jan","feb","mar","apr","jun","jul","aug","sep",
+    "oct","nov","dec","2024","2025","2026","2027","2028","fonly","okay",
+    "please","just","only","latest","recent",
 })
 
+
+def _python_filter_records(records: list, user_question: str) -> list:
+    """
+    Filter records using name, date, and status extracted from user_question.
+    Returns filtered list. If no applicable filters found, returns records unchanged.
+
+    This is the core fix for the "I will filter and get back to you" bug.
+    Instead of sending 3 sample records to Gemini and hoping it can filter,
+    we do the filtering here in O(n) Python and give Gemini (or the Python
+    table builder) the already-filtered result.
+    """
+    if not records:
+        return records
+
+    q = user_question.lower()
+    today = date.today()
+    filters_applied = False
+
+    # ── Status filter ──────────────────────────────────────────────────────
+    status_filter: Optional[str] = None
+    if any(w in q for w in ("unpaid", "outstanding", "pending", "to collect",
+                             "to receive", "not paid")):
+        status_filter = "unpaid"
+        filters_applied = True
+    elif "overdue" in q:
+        status_filter = "overdue"
+        filters_applied = True
+    elif "paid" in q and "unpaid" not in q and "not paid" not in q:
+        status_filter = "paid"
+        filters_applied = True
+    elif "draft" in q:
+        status_filter = "draft"
+        filters_applied = True
+
+    # ── Date filter ────────────────────────────────────────────────────────
+    date_prefix: Optional[str] = None
+
+    # "january 2026" / "jan 2026"
+    month_year = re.search(
+        r'\b(january|february|march|april|may|june|july|august|september'
+        r'|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep'
+        r'|oct|nov|dec)\s+(\d{4})\b', q
+    )
+    if month_year:
+        mm   = _MONTH_MAP[month_year.group(1)]
+        yyyy = month_year.group(2)
+        date_prefix = f"{yyyy}-{mm}"
+        filters_applied = True
+
+    # "in 2026" (year only, no month matched)
+    if not date_prefix:
+        year_only = re.search(r'\bin\s+(\d{4})\b', q)
+        if year_only:
+            date_prefix = year_only.group(1)
+            filters_applied = True
+
+    # "this month"
+    if not date_prefix and "this month" in q:
+        date_prefix = today.strftime("%Y-%m")
+        filters_applied = True
+
+    # "last month"
+    if not date_prefix and "last month" in q:
+        first_this = today.replace(day=1)
+        last_month_end = first_this - timedelta(days=1)
+        date_prefix = last_month_end.strftime("%Y-%m")
+        filters_applied = True
+
+    # ── Name filter ────────────────────────────────────────────────────────
+    # Strategy: strip stopwords and date/command words, then find the longest
+    # sub-sequence of remaining words that appears as a substring in at least
+    # one record's name field. This handles OCR typos like "fonly punjab..."
+    name_filter: Optional[str] = None
+    words = re.findall(r"[a-z]+", q)
+    candidate_words = [w for w in words if w not in _QUERY_STOPWORDS and len(w) > 2]
+
+    if candidate_words:
+        best_name = ""
+        # Try longest match first (up to 6 words), then shorter
+        for length in range(min(6, len(candidate_words)), 0, -1):
+            for start in range(len(candidate_words) - length + 1):
+                chunk = " ".join(candidate_words[start:start + length])
+                # Check if this chunk appears in any record's name field
+                for rec in records[:100]:  # sample first 100 for speed
+                    if not isinstance(rec, dict):
+                        continue
+                    for nf in _NAME_FIELDS:
+                        val = str(rec.get(nf, "")).lower()
+                        if chunk in val and len(chunk) > len(best_name):
+                            best_name = chunk
+                if best_name:
+                    break
+            if best_name:
+                break
+
+        if best_name:
+            name_filter = best_name
+            filters_applied = True
+
+    # ── Early exit: no filters detected ───────────────────────────────────
+    if not filters_applied:
+        return records
+
+    # ── Apply all filters ─────────────────────────────────────────────────
+    result: list = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+
+        # Name check
+        if name_filter:
+            matched = any(
+                name_filter in str(rec.get(nf, "")).lower()
+                for nf in _NAME_FIELDS
+            )
+            if not matched:
+                continue
+
+        # Date check
+        if date_prefix:
+            matched = any(
+                str(rec.get(df, "")).startswith(date_prefix)
+                for df in _DATE_FIELDS
+            )
+            if not matched:
+                continue
+
+        # Status check
+        if status_filter:
+            rec_status = str(rec.get("status", "")).lower()
+            if status_filter == "unpaid":
+                balance_val = 0.0
+                for bf in _BALANCE_FIELDS:
+                    try:
+                        balance_val = float(rec.get(bf, 0) or 0)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+                if rec_status in ("paid", "void") or balance_val <= 0:
+                    continue
+            elif status_filter == "overdue":
+                due_str = str(rec.get("due_date", ""))
+                is_overdue = rec_status == "overdue"
+                if due_str and not is_overdue:
+                    try:
+                        is_overdue = date.fromisoformat(due_str) < today
+                    except ValueError:
+                        pass
+                if not is_overdue:
+                    continue
+            elif status_filter == "paid":
+                if rec_status != "paid":
+                    continue
+            elif status_filter == "draft":
+                if rec_status != "draft":
+                    continue
+
+        result.append(rec)
+
+    log.info("python_filter_applied", extra={
+        "input": len(records), "output": len(result),
+        "name": name_filter, "date": date_prefix, "status": status_filter,
+    })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# FIX 2: Unified table-vs-Gemini routing
+# ---------------------------------------------------------------------------
+# Original bugs:
+# 1. _user_wants_aggregation matched "give me" as needing Gemini → wrong
+# 2. Gemini path sent sample_records[:3] → Gemini couldn't filter 3 rows
+# 3. _should_use_table returned empty sample_records when paginate_meta set
+
+_AGGREGATION_KEYWORDS: frozenset[str] = frozenset({
+    "total", "sum", "how many", "count", "average",
+    "how much", "what is the total", "calculate", "add up",
+})
+
+
 def _user_wants_aggregation(user_question: str) -> bool:
-    """Return True if the question is asking for a computed number/answer."""
     q = user_question.lower()
     return any(kw in q for kw in _AGGREGATION_KEYWORDS)
 
@@ -757,40 +966,45 @@ def _should_use_table(
     paginate_meta: Any,
 ) -> tuple[bool, list]:
     """
-    Decide whether to use the fast Python table path or the Gemini summarization path.
-
-    Returns (use_table: bool, records: list)
-
-    FIX: The original code had two bugs:
-    1. `wants_table` was set based on keywords, but then ANDed with `len(sample_records) > 1`,
-       meaning a single-record result or a failed _extract_records would silently fall
-       through to Gemini — which then streamed raw JSON tokens.
-    2. Aggregation questions on multi-record results still need the Python path to
-       pre-compute totals and pass a summary to Gemini (not the full raw records).
+    Returns (use_python_table, filtered_records).
 
     New logic:
-    - If paginate_meta is set  → always table (it's definitely a list)
-    - If records >= 2 AND user is NOT asking for aggregation → table
-    - If records >= 2 AND user IS asking for aggregation → Gemini path (but we pre-compute)
-    - If records == 1 or 0 → Gemini path (single record detail / status)
+    1. Extract all records from result
+    2. Run Python filter (name/date/status) — free and deterministic
+    3. Paginated → always Python table
+    4. 0 filtered records → Gemini (show "no records" gracefully)
+    5. 1 filtered record  → Gemini (detail panel)
+    6. ≥2 records + aggregation query → Gemini, but with FILTERED records (not 3-sample)
+    7. ≥2 records + list/filter query → Python table directly
     """
-    _, records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
+    _, all_records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
 
-    # Paginated result is always a list → always table
+    # Apply Python filter to get the relevant subset
+    filtered = _python_filter_records(all_records, user_question)
+
+    # Paginated result → always Python table (more records coming)
     if paginate_meta is not None:
-        return True, records
+        return True, filtered
 
-    # No records extracted → let Gemini handle it (action result, status, etc.)
-    if len(records) <= 1:
-        return False, records
+    # No records match the filter
+    if len(filtered) == 0:
+        return False, filtered  # Gemini will say "no records found"
 
-    # Multiple records: table unless user asked for aggregation
+    # Single matching record → Gemini for detail panel
+    if len(filtered) == 1:
+        return False, filtered
+
+    # Multiple records + aggregate → Gemini with full FILTERED list (not 3-sample)
     if _user_wants_aggregation(user_question):
-        return False, records
+        return False, filtered
 
-    return True, records
+    # Multiple records + list/filter → Python table
+    return True, filtered
 
 
+# ---------------------------------------------------------------------------
+# FIX 3: Streaming endpoint with corrected Gemini path
+# ---------------------------------------------------------------------------
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
     a   = _app()
@@ -879,49 +1093,62 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             last_tool = last_step.get("tool", "")
             user_q    = last_step.get("note", "") or req.message
 
-            # ── Extract pagination metadata BEFORE deciding path ──────────
+            # ── Extract pagination metadata BEFORE routing ────────────────
             paginate_meta = None
             if isinstance(last_result, dict):
                 paginate_meta = last_result.pop("__paginate__", None)
 
-            # ── FIX: Use unified decision function ────────────────────────
-            # This replaces the old fragile wants_table logic that had two bugs:
-            # 1. Fell through to Gemini when records <= 1 even for list queries
-            # 2. Gemini streamed raw JSON tokens that showed up as plain text
-            use_table, sample_records = _should_use_table(
+            # ── FIX: route with Python filter applied ─────────────────────
+            # _should_use_table now:
+            # 1. Extracts all records from last_result
+            # 2. Runs _python_filter_records (name + date + status)
+            # 3. Returns (use_table, filtered_records)
+            # filtered_records is the ACTUAL set to display — not a 3-sample
+            t_summ_start = time.monotonic()
+            use_table, filtered_records = _should_use_table(
                 last_result, last_tool, user_q, paginate_meta
             )
 
-            t_summ_start = time.monotonic()
+            # Get list_key for pagination alignment
+            list_key, _ = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
+
+            _page1_col_keys: list[str] = []
 
             if use_table:
-                # ── Fast path: Python builds the table ────────────────────
+                # ── Python path: build table from FILTERED records ────────
                 structured = _build_table_structured(
-                    last_result, last_tool, more_pages=bool(paginate_meta)
+                    last_result,
+                    last_tool,
+                    more_pages=bool(paginate_meta),
+                    records_override=filtered_records,   # ← use filtered, not raw
                 )
-                # Preserve col_keys for background pagination BEFORE popping
-                _page1_col_keys: list[str] = structured.get("col_keys") or []
-                # col_keys is internal — strip before sending to client
+                _page1_col_keys = structured.get("col_keys") or []
                 structured.pop("col_keys", None)
                 log.info("table_built_python", extra={
                     "cid": cid,
-                    "rows": len(structured.get("rows", [])),
+                    "raw_rows": len(_),
+                    "filtered_rows": len(filtered_records),
                     "ms": int((time.monotonic()-t_summ_start)*1000),
                 })
 
             else:
-                # ── Gemini path: aggregation, single record, action ───────
-                _page1_col_keys: list[str] = []  # not a table, no col keys needed
-                # numbers in Python and send only the summary to Gemini.
-                # This avoids sending huge payloads AND prevents truncation
-                # which was causing partial JSON to stream as plain text.
-                if len(sample_records) > 1:
-                    totals  = _compute_totals(sample_records)
-                    gemini_input = {
-                        "record_count": len(sample_records),
-                        "totals":       {k: round(v, 2) for k, v in totals.items()},
-                        "sample":       sample_records[:3],
+                # ── Gemini path ───────────────────────────────────────────
+                # FIX: send FULL filtered_records to Gemini (not 3-sample).
+                # The old code sent sample_records[:3] which gave Gemini
+                # nothing to work with and caused "I will filter" deferral.
+                if len(filtered_records) == 0:
+                    # Filtered to nothing — tell Gemini to say "no records"
+                    gemini_input: Any = {
+                        "message": "No records matched the applied filters.",
+                        "filter_attempted": user_q,
                     }
+                elif len(filtered_records) == 1:
+                    # Single record → detail view
+                    gemini_input = filtered_records[0]
+                elif len(filtered_records) > 1:
+                    # Multiple records + aggregate query
+                    # Send full filtered list — Gemini computes the aggregate
+                    gemini_input = filtered_records
                 else:
                     gemini_input = last_result
 
@@ -931,7 +1158,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     f"USER_QUESTION: {user_q or '(not specified)'}\n"
                     f"TOOL: {last_tool}\n"
                     f"RESULT: {result_str}"
-                    
                 )
 
                 buf = ""
@@ -959,25 +1185,22 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 try:
                     structured = json.loads(cleaned)
                 except Exception:
-                    # FIX: If Gemini returned truncated/invalid JSON, fall back to
-                    # Python table instead of showing raw JSON as a status headline.
                     log.warning("gemini_json_parse_failed", extra={
                         "cid": cid, "tool": last_tool, "buf_len": len(buf),
                         "buf_preview": buf[:200],
                     })
-                    structured = _build_table_structured(last_result, last_tool)
+                    structured = _build_table_structured(
+                        last_result, last_tool, records_override=filtered_records or None
+                    )
                     structured.pop("col_keys", None)
 
             log.info("summarize_latency", extra={
                 "cid": cid, "ms": int((time.monotonic()-t_summ_start)*1000),
                 "path": "python" if use_table else "gemini",
+                "filtered_count": len(filtered_records),
             })
 
-            # ── Emit tokens (render markdown from structured) ─────────────
-            # FIX: We emit the rendered markdown as tokens (not raw JSON).
-            # The frontend displays streamText as plain text during streaming,
-            # then re-renders from structured on 'done'. This is fine — the
-            # key is that streamText must be human-readable, not raw JSON.
+            # ── Emit tokens ───────────────────────────────────────────────
             reply_md = structured_to_markdown(structured)
             CHUNK = 80
             for i in range(0, len(reply_md), CHUNK):
@@ -988,22 +1211,17 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             sess.state.clear_workflow()
             sess.touch()
 
-            # Strip only col_keys (internal column key array) before sending to client.
-            # DO NOT strip __more_pages__ — the frontend needs it to set id="liveTable"
-            # on the table element so table_append events can find and append rows to it.
             client_structured = {k: v for k, v in structured.items() if k != "col_keys"}
             yield sse({"type": "done", "structured": client_structured,
                        "session_id": sess.session_id, "tools_used": tools_used})
 
             # ── Background pagination ──────────────────────────────────────
             if paginate_meta:
-                pg_tool       = paginate_meta["tool"]
-                pg_args       = dict(paginate_meta["args"])
-                # Use the col_keys captured from page 1 for column alignment.
-                # Fall back to detecting from sample_records if somehow not set.
-                col_keys      = _page1_col_keys or _detect_cols(sample_records, pg_tool)
-                page          = 2
-                total_fetched = len(sample_records)
+                pg_tool  = paginate_meta["tool"]
+                pg_args  = dict(paginate_meta["args"])
+                col_keys = _page1_col_keys or _detect_cols(filtered_records, pg_tool)
+                page     = 2
+                total_fetched = len(filtered_records)
 
                 while page <= MAX_AUTOPAGINATE_PAGES:
                     pg_args["page"] = page
@@ -1013,11 +1231,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             sess.mcp_session.call_tool(pg_tool, pg_args),
                             timeout=TOOL_TIMEOUT,
                         )
-                        # FIX: Must use _parse_mcp_result (not just model_dump) to
-                        # unwrap the MCP content envelope on every page fetch.
-                        # Without this, page 2+ results still have the
-                        # {"content":[{"type":"text","text":"<json>"}]} wrapper,
-                        # so _extract_records returns empty and the loop breaks.
                         page_result = _parse_mcp_result(raw_page)
                     except Exception as exc:
                         log.warning("bg_paginate_error", extra={"page": page, "error": str(exc), "cid": cid})
@@ -1027,18 +1240,23 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     if not page_records:
                         break
 
-                    total_fetched += len(page_records)
+                    # Apply same Python filter to paginated records
+                    page_filtered = _python_filter_records(page_records, user_q)
+                    total_fetched += len(page_filtered)
                     has_more       = _has_more_pages(page_result)
 
                     rows = [[str(r.get(c, "")) for c in col_keys]
-                            for r in page_records if isinstance(r, dict)]
-                    yield sse({
-                        "type":         "table_append",
-                        "rows":         rows,
-                        "total_so_far": total_fetched,
-                        "has_more":     has_more,
-                        "page":         page,
-                    })
+                            for r in page_filtered if isinstance(r, dict)]
+
+                    # Only emit if there are matching rows on this page
+                    if rows:
+                        yield sse({
+                            "type":         "table_append",
+                            "rows":         rows,
+                            "total_so_far": total_fetched,
+                            "has_more":     has_more,
+                            "page":         page,
+                        })
                     await asyncio.sleep(0)
 
                     if not has_more:
@@ -1099,4 +1317,3 @@ BASE_DIR = Path(__file__).resolve().parent
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return FileResponse(BASE_DIR / "favicon.ico", media_type="image/x-icon")
-
