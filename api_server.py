@@ -342,18 +342,18 @@ async def api_summarize(
 
     if is_action:
         return await _gemini_summarize_single(gemini, tool, user_question, result, cid)
+    elif _user_wants_aggregation(user_question):
+        # Non-streaming path: only has last_result, wrap it
+        return _python_aggregate(user_question, tool, [result])
     elif len(filtered) == 0 and all_records:
         return _python_no_records(user_question, tool)
     elif len(filtered) == 1:
         return await _gemini_summarize_single(gemini, tool, user_question, filtered[0], cid)
-    elif _user_wants_aggregation(user_question) and len(filtered) > 1:
-        return _python_aggregate(filtered, user_question, tool)
     elif len(filtered) > 1:
         s = _build_table_structured(result, tool, records_override=filtered)
         s.pop("col_keys", None)
         return s
     else:
-        # Fallback — single record or action result with no list
         return await _gemini_summarize_single(gemini, tool, user_question, result, cid)
 
 
@@ -578,7 +578,7 @@ async def _run_plan(sess: AgentSession, plan: dict, cid: str) -> dict:
                 "confirm_text": f"This involves sensitive operations: {names}. Confirm to proceed?",
                 "reply": None, "structured": None, "tools_used": []}
 
-    ok, last_result = await execute_plan(
+    ok, last_result, all_step_results = await execute_plan(
         sess.mcp_session, sess.toolbox, sess.state,
         sess.memory, a.audit, a.gemini, steps, cid,
     )
@@ -776,14 +776,25 @@ _BALANCE_FIELDS = ("balance", "balance_due", "amount_due")
 
 # Words to strip when extracting a company name from the user query
 _QUERY_STOPWORDS: frozenset[str] = frozenset({
-    "give","me","the","of","for","in","list","show","get","all",
+    # command words
+    "give","me","the","of","for","in","list","show","get","all","tell",
+    "what","how","much","many","find","fetch","display","my","our",
+    "filter","and","from","to","with","that","by","on","a","an","is","are",
+    # entity types
     "invoices","invoice","bills","bill","payments","payment","expenses",
-    "expense","contacts","contact","items","item","filter","and","from",
-    "to","with","that","by","on","a","an","is","are","january","february",
-    "march","april","may","june","july","august","september","october",
-    "november","december","jan","feb","mar","apr","jun","jul","aug","sep",
-    "oct","nov","dec","2024","2025","2026","2027","2028","fonly","okay",
-    "please","just","only","latest","recent",
+    "expense","contacts","contact","items","item","records","record",
+    # finance terms that aren't company names
+    "total","profit","revenue","income","net","earnings","loss","amount",
+    "balance","outstanding","overdue","paid","unpaid","pending","due",
+    "receive","pay","collect","owed","receivable","payable",
+    # time words
+    "january","february","march","april","may","june","july","august",
+    "september","october","november","december","jan","feb","mar","apr",
+    "jun","jul","aug","sep","oct","nov","dec","month","year","today",
+    "this","last","recent","latest","current",
+    "2023","2024","2025","2026","2027","2028",
+    # misc
+    "fonly","okay","please","just","only","will","i","you","your",
 })
 
 
@@ -822,37 +833,59 @@ def _python_filter_records(records: list, user_question: str) -> list:
 
     # ── Date filter ────────────────────────────────────────────────────────
     date_prefix: Optional[str] = None
+    date_month_only: Optional[str] = None  # set when only month (no year) given
+
+    MONTH_PAT = (r'\b(january|february|march|april|may|june|july|august|september'
+                 r'|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep'
+                 r'|oct|nov|dec)')
 
     # "january 2026" / "jan 2026"
-    month_year = re.search(
-        r'\b(january|february|march|april|may|june|july|august|september'
-        r'|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep'
-        r'|oct|nov|dec)\s+(\d{4})\b', q
-    )
-    if month_year:
-        mm   = _MONTH_MAP[month_year.group(1)]
-        yyyy = month_year.group(2)
-        date_prefix = f"{yyyy}-{mm}"
+    m = re.search(MONTH_PAT + r'\s+(\d{4})\b', q)
+    if m:
+        date_prefix     = f"{m.group(2)}-{_MONTH_MAP[m.group(1)]}"
         filters_applied = True
 
-    # "in 2026" (year only, no month matched)
+    # "2026-01" or "01/2026" explicit formats
     if not date_prefix:
-        year_only = re.search(r'\bin\s+(\d{4})\b', q)
-        if year_only:
-            date_prefix = year_only.group(1)
+        m = re.search(r'\b(20\d{2})-(0[1-9]|1[0-2])\b', q)
+        if m:
+            date_prefix = f"{m.group(1)}-{m.group(2)}"
+            filters_applied = True
+
+    # "in 2026" year only
+    if not date_prefix:
+        m = re.search(r'\bin\s+(20\d{2})\b', q)
+        if m:
+            date_prefix = m.group(1)
+            filters_applied = True
+
+    # bare year like "2026" with no "in"
+    if not date_prefix:
+        m = re.search(r'\b(20\d{2})\b', q)
+        if m:
+            date_prefix = m.group(1)
             filters_applied = True
 
     # "this month"
     if not date_prefix and "this month" in q:
-        date_prefix = today.strftime("%Y-%m")
+        date_prefix     = today.strftime("%Y-%m")
         filters_applied = True
 
     # "last month"
     if not date_prefix and "last month" in q:
-        first_this = today.replace(day=1)
-        last_month_end = first_this - timedelta(days=1)
-        date_prefix = last_month_end.strftime("%Y-%m")
+        last_month_end  = today.replace(day=1) - timedelta(days=1)
+        date_prefix     = last_month_end.strftime("%Y-%m")
         filters_applied = True
+
+    # Month alone — "january", "january month", "of january"
+    # Try current year first; also check previous year in filter loop.
+    if not date_prefix:
+        m = re.search(MONTH_PAT + r'\b', q)
+        if m:
+            mm              = _MONTH_MAP[m.group(1)]
+            date_prefix     = f"{today.year}-{mm}"
+            date_month_only = mm          # triggers prev-year fallback in loop
+            filters_applied = True
 
     # ── Name filter ────────────────────────────────────────────────────────
     # Strategy: strip stopwords and date/command words, then find the longest
@@ -906,10 +939,21 @@ def _python_filter_records(records: list, user_question: str) -> list:
 
         # Date check
         if date_prefix:
-            matched = any(
-                str(rec.get(df, "")).startswith(date_prefix)
-                for df in _DATE_FIELDS
-            )
+            matched = False
+            for df in _DATE_FIELDS:
+                val = str(rec.get(df, ""))
+                if val.startswith(date_prefix):
+                    matched = True
+                    break
+            # For month-only queries, also try previous year as fallback
+            if not matched and date_month_only:
+                prev_year = today.year - 1
+                alt_prefix = f"{prev_year}-{date_month_only}"
+                for df in _DATE_FIELDS:
+                    val = str(rec.get(df, ""))
+                    if val.startswith(alt_prefix):
+                        matched = True
+                        break
             if not matched:
                 continue
 
@@ -963,182 +1007,213 @@ def _python_filter_records(records: list, user_question: str) -> list:
 # and ensures aggregates always use ALL filtered records, never a sample.
 
 def _fmt_inr(amount: float) -> str:
-    """Format a number in Indian comma style: 12,45,678.00"""
-    if amount == 0:
-        return "₹0.00"
+    """Format a float in Indian comma notation: 10,89,783.15"""
     negative = amount < 0
-    amount = abs(amount)
-    s = f"{amount:.2f}"
-    integer_part, decimal_part = s.split(".")
-    # Indian grouping: last 3 digits, then groups of 2
-    if len(integer_part) <= 3:
-        formatted = integer_part
+    amount   = abs(amount)
+    s        = f"{amount:.2f}"
+    ip, dp   = s.split(".")
+    if len(ip) <= 3:
+        fmt = ip
     else:
-        last3 = integer_part[-3:]
-        rest = integer_part[:-3]
-        groups = []
+        last3 = ip[-3:]
+        rest  = ip[:-3]
+        grps  = []
         while rest:
-            groups.append(rest[-2:])
+            grps.append(rest[-2:])
             rest = rest[:-2]
-        formatted = ",".join(reversed(groups)) + "," + last3
-    result = f"₹{formatted}.{decimal_part}"
-    return f"-{result}" if negative else result
+        fmt = ",".join(reversed(grps)) + "," + last3
+    r = f"₹{fmt}.{dp}"
+    return f"-{r}" if negative else r
+
+
+def _get_amount(rec: dict, prefer_total: bool) -> float:
+    """Extract the best amount value from a single record."""
+    if prefer_total:
+        fields = ("total", "sub_total", "bcy_total", "amount", "balance", "balance_due")
+    else:
+        fields = ("balance", "balance_due", "amount_due", "total", "amount", "sub_total")
+    for f in fields:
+        v = rec.get(f)
+        if v not in (None, "", 0, "0", "0.0"):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+
+def _entity_name(rec: dict) -> str:
+    for f in ("customer_name", "vendor_name", "contact_name", "display_name", "name"):
+        if rec.get(f):
+            return str(rec[f])
+    for f in ("invoice_number", "bill_number", "number", "reference_number"):
+        if rec.get(f):
+            return str(rec[f])
+    return "(unknown)"
 
 
 def _python_no_records(user_q: str, tool_name: str) -> dict:
-    """Return a clean 'no records found' answer structure."""
-    entity = tool_name.replace("ZohoBooks_list_", "").replace("ZohoBooks_get_", "").replace("_", " ")
+    entity = (tool_name
+              .replace("ZohoBooks_list_", "")
+              .replace("ZohoBooks_get_", "")
+              .replace("_", " "))
     return {
-        "format": "answer",
-        "question": user_q,
-        "answer": f"No {entity} records found matching your filters.",
+        "format":    "answer",
+        "question":  user_q,
+        "answer":    f"No {entity} records found matching your query.",
         "breakdown": [],
-        "note": f"Applied filters from: {user_q}",
+        "note":      f"Filters applied from: \"{user_q}\"",
     }
 
 
-def _python_aggregate(records: list, user_q: str, tool_name: str) -> dict:
+def _python_aggregate(user_q: str, tool_name: str,
+                      all_step_results: list) -> dict:
     """
-    Compute aggregate metrics entirely in Python from the filtered record list.
+    Compute aggregate metrics from ALL step results in pure Python.
 
-    Detects what the user wants:
-    - "how many" / "count"  → count of records
-    - "total" / "sum" / "how much" / "amount"  → sum of balance/total fields
-    - "average"  → average of balance/total fields
+    - Profit / net income → invoices total  minus  bills total
+    - Outstanding / balance / receivable → sum of balance field
+    - Total / amount / revenue → sum of total field
+    - Count → number of matching records
+    - Average → mean of amount field
 
-    Returns an "answer" format dict.
+    Filters (date, name, status) are applied independently to each
+    step result so multi-tool queries work correctly.
     """
     q = user_q.lower()
-    n = len(records)
 
-    # ── Determine primary amount field ─────────────────────────────────────
-    # Try balance first (amount still owed), then total (invoice face value)
-    AMOUNT_PRIORITY = ("balance", "balance_due", "amount_due", "total",
-                       "amount", "sub_total", "bcy_total")
-    primary_field = None
-    for f in AMOUNT_PRIORITY:
-        if any(isinstance(r, dict) and f in r for r in records[:10]):
-            primary_field = f
-            break
+    # ── Classify intent ────────────────────────────────────────────────────
+    wants_profit  = any(w in q for w in ("profit", "net profit", "net income",
+                                          "net revenue", "earnings", "p&l",
+                                          "income minus", "revenue minus",
+                                          "minus expense", "minus bill"))
+    wants_balance = any(w in q for w in ("outstanding", "owed", "receivable",
+                                          "payable", "balance", "unpaid",
+                                          "pending", "to receive", "to pay",
+                                          "to collect", "due"))
+    wants_count   = any(w in q for w in ("how many", "count", "number of")) \
+                    and not any(w in q for w in ("total", "amount", "sum", "how much"))
+    wants_avg     = "average" in q
+    prefer_total  = not wants_balance  # revenue/profit uses total, not balance
 
-    # ── Compute totals ─────────────────────────────────────────────────────
-    total_amount = 0.0
-    count_nonzero = 0
-    for rec in records:
-        if not isinstance(rec, dict):
+    # ── Process each step result ───────────────────────────────────────────
+    invoice_recs: list[dict] = []
+    bill_recs:    list[dict] = []
+    other_recs:   list[dict] = []
+
+    for result in all_step_results:
+        if not isinstance(result, dict):
             continue
-        for f in AMOUNT_PRIORITY:
-            if f in rec:
-                try:
-                    v = float(rec[f] or 0)
-                    total_amount += v
-                    if v > 0:
-                        count_nonzero += 1
-                except (TypeError, ValueError):
-                    pass
-                break
+        _, recs = _extract_records(result)
+        if not recs:
+            continue
+        filtered = _python_filter_records(recs, user_q)
+        if not filtered:
+            continue
 
-    # ── Determine what the user asked ──────────────────────────────────────
-    wants_count = any(w in q for w in ("how many", "count", "number of"))
-    wants_avg   = "average" in q
+        first = filtered[0]
+        if "invoice_number" in first or "invoice_id" in first:
+            invoice_recs.extend(filtered)
+        elif "bill_number" in first or "bill_id" in first:
+            bill_recs.extend(filtered)
+        else:
+            other_recs.extend(filtered)
 
-    if wants_count and not any(w in q for w in ("total", "amount", "sum", "how much")):
+    all_recs = invoice_recs + bill_recs + other_recs
+    n = len(all_recs)
+
+    # ── Profit calculation (invoices - bills) ──────────────────────────────
+    if wants_profit:
+        inv_total  = sum(_get_amount(r, prefer_total=True) for r in invoice_recs)
+        bill_total = sum(_get_amount(r, prefer_total=True) for r in bill_recs)
+        profit     = inv_total - bill_total
+        label      = "Profit" if profit >= 0 else "Loss"
+
+        # Date range note
+        date_note = ""
+        month_words = ("january","february","march","april","may","june","july",
+                       "august","september","october","november","december",
+                       "jan","feb","mar","apr","jun","jul","aug","sep","oct","nov","dec")
+        if any(w in q for w in month_words) or re.search(r'\b20\d{2}\b', q):
+            date_note = " · date filter applied"
+
+        return {
+            "format":    "answer",
+            "question":  user_q,
+            "answer":    f"{_fmt_inr(profit)} ({label})",
+            "breakdown": [
+                [f"Revenue — invoices ({len(invoice_recs)} records)", _fmt_inr(inv_total)],
+                [f"Expenses — bills ({len(bill_recs)} records)",      _fmt_inr(bill_total)],
+                [label,                                                _fmt_inr(profit)],
+            ],
+            "note": f"Profit = Revenue − Expenses{date_note}",
+        }
+
+    # ── Use the best set of records for remaining calc ────────────────────
+    # If only one entity type was fetched, use that. Otherwise use all.
+    if invoice_recs and not bill_recs:
+        calc_recs = invoice_recs
+    elif bill_recs and not invoice_recs:
+        calc_recs = bill_recs
+    else:
+        calc_recs = all_recs
+
+    if not calc_recs:
+        return _python_no_records(user_q, tool_name)
+
+    n = len(calc_recs)
+
+    # ── Compute total ──────────────────────────────────────────────────────
+    total_amount = sum(_get_amount(r, prefer_total=prefer_total) for r in calc_recs)
+
+    if wants_count:
         answer_text = f"{n} records"
-        field_label = "Count"
-    elif wants_avg and primary_field:
+    elif wants_avg:
         avg = total_amount / n if n else 0
         answer_text = f"{_fmt_inr(avg)} average across {n} records"
-        field_label = primary_field.replace("_", " ").title()
     else:
-        # Default: sum
         answer_text = f"{_fmt_inr(total_amount)} across {n} records"
-        field_label = primary_field.replace("_", " ").title() if primary_field else "Total"
 
-    # ── Breakdown by top entities ──────────────────────────────────────────
-    # Group by customer/vendor name, show top 15
-    NAME_FIELDS = ("customer_name", "vendor_name", "contact_name", "name")
+    # ── Breakdown by entity name ───────────────────────────────────────────
     entity_totals: dict[str, float] = {}
     entity_counts: dict[str, int]   = {}
+    for rec in calc_recs:
+        name = _entity_name(rec)
+        amt  = _get_amount(rec, prefer_total=prefer_total)
+        entity_totals[name] = entity_totals.get(name, 0.0) + amt
+        entity_counts[name] = entity_counts.get(name, 0)  + 1
 
-    for rec in records:
-        if not isinstance(rec, dict):
-            continue
-        entity_name = ""
-        for nf in NAME_FIELDS:
-            if rec.get(nf):
-                entity_name = str(rec[nf])
-                break
-        if not entity_name:
-            # Fall back to invoice/bill number
-            for nf in ("invoice_number", "bill_number", "number"):
-                if rec.get(nf):
-                    entity_name = str(rec[nf])
-                    break
-        if not entity_name:
-            entity_name = "(unknown)"
-
-        amt = 0.0
-        for f in AMOUNT_PRIORITY:
-            if f in rec:
-                try:
-                    amt = float(rec[f] or 0)
-                except (TypeError, ValueError):
-                    pass
-                break
-        entity_totals[entity_name] = entity_totals.get(entity_name, 0.0) + amt
-        entity_counts[entity_name] = entity_counts.get(entity_name, 0) + 1
-
-    # Sort by total descending, keep top 15
-    breakdown_pairs = sorted(entity_totals.items(), key=lambda x: -x[1])[:15]
     breakdown = []
-    for name, amt in breakdown_pairs:
-        cnt = entity_counts.get(name, 1)
+    for name, amt in sorted(entity_totals.items(), key=lambda x: -x[1])[:15]:
+        cnt   = entity_counts[name]
         label = f"{name} ({cnt} records)" if cnt > 1 else name
-        if wants_count:
-            breakdown.append([label, str(cnt)])
-        else:
-            breakdown.append([label, _fmt_inr(amt)])
+        breakdown.append([label, str(cnt) if wants_count else _fmt_inr(amt)])
 
-    # ── Build filter description ───────────────────────────────────────────
+    # ── Note ───────────────────────────────────────────────────────────────
     note_parts = []
-    if any(w in q for w in ("punjab", "national", "bank", "acme", "ltd", "pvt")):
-        # There's a name filter — note it
-        note_parts.append(f"filtered by customer/vendor name from query")
-    if any(w in q for w in ("january","february","march","april","may","june",
-                             "july","august","september","october","november","december",
-                             "2024","2025","2026","2027")):
+    month_words = ("january","february","march","april","may","june","july",
+                   "august","september","october","november","december",
+                   "jan","feb","mar","apr","jun","jul","aug","sep","oct","nov","dec")
+    if any(w in q for w in month_words) or re.search(r'\b20\d{2}\b', q):
         note_parts.append("date filter applied")
     if any(w in q for w in ("overdue","unpaid","outstanding","paid","draft")):
         note_parts.append("status filter applied")
     note_parts.append(f"computed from {n} matching records")
-    note = " · ".join(note_parts)
 
     return {
         "format":    "answer",
         "question":  user_q,
         "answer":    answer_text,
         "breakdown": breakdown,
-        "note":      note,
+        "note":      " · ".join(note_parts),
     }
 
 
-async def _gemini_summarize_single(
-    gemini_client,
-    tool_name: str,
-    user_q: str,
-    result: Any,
-    cid: str,
-) -> dict:
-    """
-    Use Gemini ONLY for cases Python can't handle:
-    - Single-record detail panels
-    - Action results (create/update/delete/void/send)
-
-    For everything else (tables, aggregates, no-records) use Python functions.
-    """
+async def _gemini_summarize_single(gemini_client, tool_name: str,
+                                    user_q: str, result: Any, cid: str) -> dict:
+    """Gemini for single-record detail panels and action results only."""
     from zoho_agent import SUMMARIZE_SYSTEM, _safe_result_str, MODEL
     import re as _re
-
     prompt = (
         f"TODAY: {date.today().isoformat()}\n"
         f"USER_QUESTION: {user_q or '(not specified)'}\n"
@@ -1162,13 +1237,11 @@ async def _gemini_summarize_single(
                 buf += chunk.text or ""
         await asyncio.wait_for(_collect(), timeout=GEMINI_TIMEOUT)
     except asyncio.TimeoutError:
-        log.warning("gemini_single_timeout", extra={"cid": cid, "tool": tool_name})
         return {"format": "status", "ok": True,
                 "headline": "Response timed out.", "detail": str(result)[:300]}
     except Exception as exc:
         log.warning("gemini_single_error", extra={"cid": cid, "error": str(exc)})
         return {"format": "status", "ok": True, "headline": "Done.", "detail": ""}
-
     cleaned = _re.sub(r"^```(?:json)?\s*|\s*```$", "", buf.strip(), flags=_re.MULTILINE).strip()
     try:
         return json.loads(cleaned)
@@ -1287,7 +1360,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 return
 
             t_exec_start = time.monotonic()
-            ok, last_result = await execute_plan(
+            ok, last_result, all_step_results = await execute_plan(
                 sess.mcp_session, sess.toolbox, sess.state,
                 sess.memory, a.audit, a.gemini, steps, cid,
             )
@@ -1319,7 +1392,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             # ── Route: Python handles everything; Gemini only for detail/action ──
             t_summ_start = time.monotonic()
 
-            # Extract all records and apply Python filters (name/date/status)
+            # Extract records from last result and apply filters
             list_key, all_records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
             filtered_records = _python_filter_records(all_records, user_q)
 
@@ -1328,13 +1401,20 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                                  ("create", "update", "delete", "void", "send", "submit", "mark"))
 
             if is_action_tool:
-                # Action result (create/update/delete/void) → Gemini status
+                # Action result → Gemini for natural status message
                 structured = await _gemini_summarize_single(
                     a.gemini, last_tool, user_q, last_result, cid
                 )
 
+            elif _user_wants_aggregation(user_q):
+                # AGGREGATE — always computed in Python using ALL step results.
+                # all_step_results contains raw results from every tool called
+                # (e.g. both list_invoices + list_bills for a profit query).
+                # _python_aggregate applies filters and computes per entity type.
+                structured = _python_aggregate(user_q, last_tool, all_step_results)
+
             elif len(filtered_records) == 0:
-                # No matching records
+                # No records matched
                 structured = _python_no_records(user_q, last_tool)
 
             elif len(filtered_records) == 1:
@@ -1343,13 +1423,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     a.gemini, last_tool, user_q, filtered_records[0], cid
                 )
 
-            elif _user_wants_aggregation(user_q):
-                # AGGREGATE: compute entirely in Python — 100% accurate,
-                # works across all filtered records with no truncation risk.
-                structured = _python_aggregate(filtered_records, user_q, last_tool)
-
             else:
-                # List/filter → Python table (paginated or not)
+                # List/filter → Python table
                 structured = _build_table_structured(
                     last_result, last_tool,
                     more_pages=bool(paginate_meta),
