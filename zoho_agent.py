@@ -1428,14 +1428,15 @@ async def execute_plan(
     gemini,
     steps: list[dict],
     correlation_id: str,
-) -> tuple[bool, Optional[Any]]:
+) -> tuple[bool, Optional[Any], list]:
     """
     Execute a plan's steps sequentially (or in parallel batches).
 
-    Returns (True, last_result) on success.
-    Returns (False, error_dict) on failure — where error_dict contains the
-    last error recorded in memory so callers can show a useful message
-    instead of the generic "Execution failed." string.
+    Returns (True, last_result, all_step_results) on success.
+    Returns (False, error_dict, []) on failure.
+
+    all_step_results contains every step's raw API result — needed for
+    multi-tool queries like profit (invoices result + bills result).
     """
     last_result: Optional[Any] = None
     step_results: list[Any] = []
@@ -1492,7 +1493,7 @@ async def execute_plan(
             results = await asyncio.gather(*tasks)
             for (ok, rdata), s in zip(results, batch):
                 if not ok:
-                    return False, _last_error()
+                    return False, _last_error(), []
                 last_result = rdata
                 step_results.append(rdata)
             i = j
@@ -1502,13 +1503,13 @@ async def execute_plan(
             session, toolbox, state, memory, audit, step, correlation_id, gemini
         )
         if not ok:
-            return False, _last_error()
+            return False, _last_error(), []
 
         last_result = rdata
         step_results.append(rdata)
         i += 1
 
-    return True, last_result
+    return True, last_result, step_results
 
 
 # ---------------------------------------------------------------------------
