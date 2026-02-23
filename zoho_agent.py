@@ -1356,7 +1356,7 @@ async def execute_step(
         audit=audit,
         correlation_id=correlation_id,
     )
-        }
+        
 
     add_memory(memory, {
         "tool":      tool_name,
@@ -1661,6 +1661,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
