@@ -53,7 +53,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 load_dotenv("api.env")
 
-MODEL: str                   = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+MODEL: str                   = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 PLANNER_MODEL: str           = os.getenv("GEMINI_PLANNER_MODEL", MODEL)
 MAX_MEMORY_TOKENS: int       = int(os.getenv("MAX_MEMORY_TOKENS", "24000"))
 MAX_MEMORY_ENTRIES: int      = int(os.getenv("MAX_MEMORY_ENTRIES", "60"))
@@ -1628,6 +1628,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
