@@ -1348,14 +1348,14 @@ async def execute_step(
 
     if _is_pageable(tool_name) and _has_more_pages(result_data):
         if _is_pageable(tool_name) and _has_more_pages(result_data):
-    result_data = await _autopaginate(
-        session=session,
-        tool_name=tool_name,
-        base_args=args,
-        first_result=result_data,
-        audit=audit,
-        correlation_id=correlation_id,
-    )
+            result_data = await _autopaginate(
+            session=session,
+            tool_name=tool_name,
+            base_args=args,
+            first_result=result_data,
+            audit=audit,
+            correlation_id=correlation_id,
+            )
         
 
     add_memory(memory, {
@@ -1661,6 +1661,7 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
