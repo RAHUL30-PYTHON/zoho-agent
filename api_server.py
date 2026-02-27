@@ -53,7 +53,6 @@ from zoho_agent import (
     MAX_REPLAN_ATTEMPTS,
     MODEL,
     PLANNER_MODEL,
-    SUMMARIZE_SYSTEM,
     TOOL_TIMEOUT,
     _estimate_tokens,
     _extract_records,
@@ -70,6 +69,7 @@ from zoho_agent import (
     log,
     normalize_plan,
     validate_env,
+    _build_summarize_system_with_date,
 )
 
 load_dotenv("api.env")
@@ -321,7 +321,7 @@ def _app() -> _App:
 
 
 # ---------------------------------------------------------------------------
-# Summarizer (used by /chat non-streaming endpoint)
+# Core summarizer — used by /chat endpoint
 # ---------------------------------------------------------------------------
 async def api_summarize(
     gemini: genai.Client,
@@ -331,10 +331,6 @@ async def api_summarize(
     cid: str = "",
     user_question: str = "",
 ) -> dict:
-    """
-    Non-streaming summarizer used by the /chat endpoint.
-    Uses same 4-tier routing as the streaming endpoint.
-    """
     is_action = any(w in tool.lower() for w in
                     ("create","update","delete","void","send","submit","mark"))
     _, all_records = _extract_records(result) if isinstance(result, dict) else ("", [])
@@ -435,11 +431,6 @@ def _records_to_rows(records: list, tool_name: str = "") -> dict:
 def _build_table_structured(result: Any, tool_name: str,
                              more_pages: bool = False,
                              records_override: Optional[list] = None) -> dict:
-    """
-    Build a table structured response.
-    If records_override is provided, use those records instead of extracting from result.
-    This allows pre-filtered records to be used directly.
-    """
     if records_override is not None:
         records = records_override
     else:
@@ -470,12 +461,6 @@ def _build_table_structured(result: Any, tool_name: str,
     if more_pages:
         structured["__more_pages__"] = True
     return structured
-
-
-def _fast_fallback_summary(result: Any, tool_name: str) -> str:
-    s = _build_table_structured(result, tool_name)
-    s.pop("col_keys", None)
-    return json.dumps(s)
 
 
 def structured_to_markdown(data: dict) -> str:
@@ -662,7 +647,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Zoho Books Agent API",
-    version="2.3.0",
+    version="3.0.0",
     description="AI-powered Zoho Books assistant (Gemini + MCP, per-session MCP URL + Org ID)",
     lifespan=lifespan,
 )
@@ -756,13 +741,8 @@ async def confirm(req: ConfirmRequest) -> ChatResponse:
 
 
 # ---------------------------------------------------------------------------
-# FIX 1: Python-side filter for name / date / status
+# Python-side filter — name / date / status
 # ---------------------------------------------------------------------------
-# This runs entirely in Python before Gemini is ever called.
-# It handles the "give me invoices of X for January 2026" case that was
-# causing Gemini to say "I will filter and get back to you" — because
-# Gemini was only seeing 3 sample records (not the full filtered list).
-
 _MONTH_MAP: dict[str, str] = {
     "january":"01","february":"02","march":"03","april":"04",
     "may":"05","june":"06","july":"07","august":"08",
@@ -775,40 +755,27 @@ _NAME_FIELDS    = ("customer_name", "vendor_name", "contact_name", "display_name
 _DATE_FIELDS    = ("date", "invoice_date", "bill_date", "expense_date", "transaction_date")
 _BALANCE_FIELDS = ("balance", "balance_due", "amount_due")
 
-# Words to strip when extracting a company name from the user query
 _QUERY_STOPWORDS: frozenset[str] = frozenset({
-    # command words
     "give","me","the","of","for","in","list","show","get","all","tell",
     "what","how","much","many","find","fetch","display","my","our",
     "filter","and","from","to","with","that","by","on","a","an","is","are",
-    # entity types
     "invoices","invoice","bills","bill","payments","payment","expenses",
     "expense","contacts","contact","items","item","records","record",
-    # finance terms that aren't company names
     "total","profit","revenue","income","net","earnings","loss","amount",
     "balance","outstanding","overdue","paid","unpaid","pending","due",
     "receive","pay","collect","owed","receivable","payable",
-    # time words
     "january","february","march","april","may","june","july","august",
     "september","october","november","december","jan","feb","mar","apr",
     "jun","jul","aug","sep","oct","nov","dec","month","year","today",
     "this","last","recent","latest","current",
     "2023","2024","2025","2026","2027","2028",
-    # misc
     "fonly","okay","please","just","only","will","i","you","your",
+    "top","bottom","best","worst","highest","lowest","compare","trend",
+    "ranking","ranked","growth","analysis","breakdown","summarize",
 })
 
 
 def _python_filter_records(records: list, user_question: str) -> list:
-    """
-    Filter records using name, date, and status extracted from user_question.
-    Returns filtered list. If no applicable filters found, returns records unchanged.
-
-    This is the core fix for the "I will filter and get back to you" bug.
-    Instead of sending 3 sample records to Gemini and hoping it can filter,
-    we do the filtering here in O(n) Python and give Gemini (or the Python
-    table builder) the already-filtered result.
-    """
     if not records:
         return records
 
@@ -834,76 +801,63 @@ def _python_filter_records(records: list, user_question: str) -> list:
 
     # ── Date filter ────────────────────────────────────────────────────────
     date_prefix: Optional[str] = None
-    date_month_only: Optional[str] = None  # set when only month (no year) given
+    date_month_only: Optional[str] = None
 
     MONTH_PAT = (r'\b(january|february|march|april|may|june|july|august|september'
                  r'|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep'
                  r'|oct|nov|dec)')
 
-    # "january 2026" / "jan 2026"
     m = re.search(MONTH_PAT + r'\s+(\d{4})\b', q)
     if m:
         date_prefix     = f"{m.group(2)}-{_MONTH_MAP[m.group(1)]}"
         filters_applied = True
 
-    # "2026-01" or "01/2026" explicit formats
     if not date_prefix:
         m = re.search(r'\b(20\d{2})-(0[1-9]|1[0-2])\b', q)
         if m:
             date_prefix = f"{m.group(1)}-{m.group(2)}"
             filters_applied = True
 
-    # "in 2026" year only
     if not date_prefix:
         m = re.search(r'\bin\s+(20\d{2})\b', q)
         if m:
             date_prefix = m.group(1)
             filters_applied = True
 
-    # bare year like "2026" with no "in"
     if not date_prefix:
         m = re.search(r'\b(20\d{2})\b', q)
         if m:
             date_prefix = m.group(1)
             filters_applied = True
 
-    # "this month"
     if not date_prefix and "this month" in q:
         date_prefix     = today.strftime("%Y-%m")
         filters_applied = True
 
-    # "last month"
     if not date_prefix and "last month" in q:
         last_month_end  = today.replace(day=1) - timedelta(days=1)
         date_prefix     = last_month_end.strftime("%Y-%m")
         filters_applied = True
 
-    # Month alone — "january", "january month", "of january"
-    # Try current year first; also check previous year in filter loop.
     if not date_prefix:
         m = re.search(MONTH_PAT + r'\b', q)
         if m:
             mm              = _MONTH_MAP[m.group(1)]
             date_prefix     = f"{today.year}-{mm}"
-            date_month_only = mm          # triggers prev-year fallback in loop
+            date_month_only = mm
             filters_applied = True
 
     # ── Name filter ────────────────────────────────────────────────────────
-    # Strategy: strip stopwords and date/command words, then find the longest
-    # sub-sequence of remaining words that appears as a substring in at least
-    # one record's name field. This handles OCR typos like "fonly punjab..."
     name_filter: Optional[str] = None
     words = re.findall(r"[a-z]+", q)
     candidate_words = [w for w in words if w not in _QUERY_STOPWORDS and len(w) > 2]
 
     if candidate_words:
         best_name = ""
-        # Try longest match first (up to 6 words), then shorter
         for length in range(min(6, len(candidate_words)), 0, -1):
             for start in range(len(candidate_words) - length + 1):
                 chunk = " ".join(candidate_words[start:start + length])
-                # Check if this chunk appears in any record's name field
-                for rec in records[:100]:  # sample first 100 for speed
+                for rec in records[:100]:
                     if not isinstance(rec, dict):
                         continue
                     for nf in _NAME_FIELDS:
@@ -919,17 +873,14 @@ def _python_filter_records(records: list, user_question: str) -> list:
             name_filter = best_name
             filters_applied = True
 
-    # ── Early exit: no filters detected ───────────────────────────────────
     if not filters_applied:
         return records
 
-    # ── Apply all filters ─────────────────────────────────────────────────
     result: list = []
     for rec in records:
         if not isinstance(rec, dict):
             continue
 
-        # Name check
         if name_filter:
             matched = any(
                 name_filter in str(rec.get(nf, "")).lower()
@@ -938,7 +889,6 @@ def _python_filter_records(records: list, user_question: str) -> list:
             if not matched:
                 continue
 
-        # Date check
         if date_prefix:
             matched = False
             for df in _DATE_FIELDS:
@@ -946,7 +896,6 @@ def _python_filter_records(records: list, user_question: str) -> list:
                 if val.startswith(date_prefix):
                     matched = True
                     break
-            # For month-only queries, also try previous year as fallback
             if not matched and date_month_only:
                 prev_year = today.year - 1
                 alt_prefix = f"{prev_year}-{date_month_only}"
@@ -958,7 +907,6 @@ def _python_filter_records(records: list, user_question: str) -> list:
             if not matched:
                 continue
 
-        # Status check
         if status_filter:
             rec_status = str(rec.get("status", "")).lower()
             if status_filter == "unpaid":
@@ -998,17 +946,9 @@ def _python_filter_records(records: list, user_question: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Python-native summarization helpers
+# Python-native aggregation helpers
 # ---------------------------------------------------------------------------
-# These replace Gemini for all structured output cases except:
-#   - Single-record detail panels
-#   - Action results (create/update/delete)
-# Python is used for: aggregates, tables, "no records" messages.
-# This eliminates the Gemini "I will filter and get back to you" problem
-# and ensures aggregates always use ALL filtered records, never a sample.
-
 def _fmt_inr(amount: float) -> str:
-    """Format a float in Indian comma notation: 10,89,783.15"""
     negative = amount < 0
     amount   = abs(amount)
     s        = f"{amount:.2f}"
@@ -1028,7 +968,6 @@ def _fmt_inr(amount: float) -> str:
 
 
 def _get_amount(rec: dict, prefer_total: bool) -> float:
-    """Extract the best amount value from a single record."""
     if prefer_total:
         fields = ("total", "sub_total", "bcy_total", "amount", "balance", "balance_due")
     else:
@@ -1069,21 +1008,8 @@ def _python_no_records(user_q: str, tool_name: str) -> dict:
 
 def _python_aggregate(user_q: str, tool_name: str,
                       all_step_results: list) -> dict:
-    """
-    Compute aggregate metrics from ALL step results in pure Python.
-
-    - Profit / net income → invoices total  minus  bills total
-    - Outstanding / balance / receivable → sum of balance field
-    - Total / amount / revenue → sum of total field
-    - Count → number of matching records
-    - Average → mean of amount field
-
-    Filters (date, name, status) are applied independently to each
-    step result so multi-tool queries work correctly.
-    """
     q = user_q.lower()
 
-    # ── Classify intent ────────────────────────────────────────────────────
     wants_profit  = any(w in q for w in ("profit", "net profit", "net income",
                                           "net revenue", "earnings", "p&l",
                                           "income minus", "revenue minus",
@@ -1095,9 +1021,8 @@ def _python_aggregate(user_q: str, tool_name: str,
     wants_count   = any(w in q for w in ("how many", "count", "number of")) \
                     and not any(w in q for w in ("total", "amount", "sum", "how much"))
     wants_avg     = "average" in q
-    prefer_total  = not wants_balance  # revenue/profit uses total, not balance
+    prefer_total  = not wants_balance
 
-    # ── Process each step result ───────────────────────────────────────────
     invoice_recs: list[dict] = []
     bill_recs:    list[dict] = []
     other_recs:   list[dict] = []
@@ -1123,14 +1048,12 @@ def _python_aggregate(user_q: str, tool_name: str,
     all_recs = invoice_recs + bill_recs + other_recs
     n = len(all_recs)
 
-    # ── Profit calculation (invoices - bills) ──────────────────────────────
     if wants_profit:
         inv_total  = sum(_get_amount(r, prefer_total=True) for r in invoice_recs)
         bill_total = sum(_get_amount(r, prefer_total=True) for r in bill_recs)
         profit     = inv_total - bill_total
         label      = "Profit" if profit >= 0 else "Loss"
 
-        # Date range note
         date_note = ""
         month_words = ("january","february","march","april","may","june","july",
                        "august","september","october","november","december",
@@ -1150,8 +1073,6 @@ def _python_aggregate(user_q: str, tool_name: str,
             "note": f"Profit = Revenue − Expenses{date_note}",
         }
 
-    # ── Use the best set of records for remaining calc ────────────────────
-    # If only one entity type was fetched, use that. Otherwise use all.
     if invoice_recs and not bill_recs:
         calc_recs = invoice_recs
     elif bill_recs and not invoice_recs:
@@ -1163,8 +1084,6 @@ def _python_aggregate(user_q: str, tool_name: str,
         return _python_no_records(user_q, tool_name)
 
     n = len(calc_recs)
-
-    # ── Compute total ──────────────────────────────────────────────────────
     total_amount = sum(_get_amount(r, prefer_total=prefer_total) for r in calc_recs)
 
     if wants_count:
@@ -1175,7 +1094,6 @@ def _python_aggregate(user_q: str, tool_name: str,
     else:
         answer_text = f"{_fmt_inr(total_amount)} across {n} records"
 
-    # ── Breakdown by entity name ───────────────────────────────────────────
     entity_totals: dict[str, float] = {}
     entity_counts: dict[str, int]   = {}
     for rec in calc_recs:
@@ -1190,7 +1108,6 @@ def _python_aggregate(user_q: str, tool_name: str,
         label = f"{name} ({cnt} records)" if cnt > 1 else name
         breakdown.append([label, str(cnt) if wants_count else _fmt_inr(amt)])
 
-    # ── Note ───────────────────────────────────────────────────────────────
     note_parts = []
     month_words = ("january","february","march","april","may","june","july",
                    "august","september","october","november","december",
@@ -1214,24 +1131,13 @@ _VALID_FORMATS = frozenset({"table", "answer", "panel", "status"})
 
 
 def _sanitize_structured(data: dict, user_q: str) -> dict:
-    """
-    Ensure Gemini's response uses only supported format values.
-    Converts any invented format (chart, graph, report, etc.) to "answer"
-    by promoting the most useful content from the unknown structure.
-    """
     fmt = data.get("format", "")
     if fmt in _VALID_FORMATS:
         return data
 
-    # Log the hallucinated format so we can improve the prompt over time
     log.warning("gemini_invalid_format", extra={"format": fmt, "question": user_q[:80]})
 
-    # Attempt to rescue useful content from the invalid structure
-    # Common hallucinated formats: "chart" (has data=[{label, value}]),
-    # "graph", "report" (has sections=[]), "summary" (has content="")
     rescued_breakdown: list = []
-
-    # chart/graph: data = [{label: ..., value: ...}, ...]
     data_list = data.get("data") or data.get("items") or data.get("rows") or []
     if isinstance(data_list, list):
         for item in data_list[:30]:
@@ -1255,12 +1161,10 @@ def _sanitize_structured(data: dict, user_q: str) -> dict:
 
 async def _gemini_summarize_single(gemini_client, tool_name: str,
                                     user_q: str, result: Any, cid: str) -> dict:
-    """Gemini for analytical queries, single-record detail panels, and action results."""
-    from zoho_agent import SUMMARIZE_SYSTEM, _safe_result_str, MODEL
     import re as _re
 
     today      = date.today()
-    system_str = SUMMARIZE_SYSTEM.replace("{today}", today.strftime("%d %b %Y"))
+    system_str = _build_summarize_system_with_date()
 
     prompt = (
         f"TODAY: {today.isoformat()}\n"
@@ -1277,7 +1181,7 @@ async def _gemini_summarize_single(gemini_client, tool_name: str,
                 contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=prompt)])],
                 config=gtypes.GenerateContentConfig(
                     system_instruction=system_str,
-                    temperature=0.1,
+                    temperature=0.1,  # LOW = consistent, no hallucinations
                     response_mime_type="application/json",
                     max_output_tokens=4096,
                 ),
@@ -1302,33 +1206,8 @@ async def _gemini_summarize_single(gemini_client, tool_name: str,
 
 
 # ---------------------------------------------------------------------------
-# FIX 2: Unified table-vs-Gemini routing
-# ---------------------------------------------------------------------------
-# Original bugs:
-# 1. _user_wants_aggregation matched "give me" as needing Gemini → wrong
-# 2. Gemini path sent sample_records[:3] → Gemini couldn't filter 3 rows
-# 3. _should_use_table returned empty sample_records when paginate_meta set
-
-# ---------------------------------------------------------------------------
 # Query classification
 # ---------------------------------------------------------------------------
-# Three tiers, evaluated in order:
-#
-#  PYTHON_MATH   — formulas Python computes exactly:
-#                  totals, counts, averages, profit (invoices - bills)
-#
-#  PYTHON_TABLE  — plain list/filter with no analysis needed:
-#                  "show me invoices", "list bills for january"
-#
-#  GEMINI_ANALYSIS — everything else that needs intelligence:
-#                  rankings ("top 5"), comparisons, trends, "who/which/why",
-#                  "best/worst", multi-criteria questions, natural language
-#                  summaries, etc.
-#
-# The key insight: Python should NEVER try to handle analytical questions
-# via keyword lists — that will always have gaps. Gemini gets those instead,
-# with the FULL filtered dataset so it can answer correctly.
-
 _PYTHON_MATH_PATTERNS = (
     r'\btotal\b', r'\bsum\b', r'\bhow much\b', r'\bamount\b',
     r'\bhow many\b', r'\bcount\b', r'\bnumber of\b',
@@ -1355,50 +1234,20 @@ _GEMINI_ANALYSIS_PATTERNS = (
 )
 
 def _classify_query(user_question: str) -> str:
-    """
-    Returns one of: "python_math", "gemini_analysis", "python_table"
-
-    python_math     → Python computes exact totals, counts, profit
-    gemini_analysis → Gemini answers with full filtered dataset
-    python_table    → Python builds a simple list/filter table
-    """
     q = user_question.lower()
-
-    # Gemini analysis takes priority — catch rankings, comparisons, etc.
     if any(re.search(p, q) for p in _GEMINI_ANALYSIS_PATTERNS):
         return "gemini_analysis"
-
-    # Python math — exact numeric computations
     if any(re.search(p, q) for p in _PYTHON_MATH_PATTERNS):
         return "python_math"
-
-    # Everything else: plain list/filter
     return "python_table"
 
 
 def _user_wants_aggregation(user_question: str) -> bool:
-    """Legacy alias — kept for api_summarize compatibility."""
     return _classify_query(user_question) == "python_math"
 
 
-def _should_use_table(
-    last_result: Any,
-    tool_name: str,
-    user_question: str,
-    paginate_meta: Any,
-) -> tuple[bool, list]:
-    """
-    DEPRECATED — kept for backward compatibility with the non-streaming /chat endpoint.
-    The streaming /chat/stream endpoint now routes directly without this function.
-    Returns (use_python_table, filtered_records).
-    """
-    _, all_records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
-    filtered = _python_filter_records(all_records, user_question)
-    return True, filtered  # always use Python path; caller handles routing
-
-
 # ---------------------------------------------------------------------------
-# FIX 3: Streaming endpoint with corrected Gemini path
+# Streaming endpoint
 # ---------------------------------------------------------------------------
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
@@ -1480,7 +1329,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             log.info("exec_latency", extra={"cid": cid, "ms": int((time.monotonic()-t_exec_start)*1000), "tools": tools_used})
 
             if not ok:
-                # execute_plan returns an error dict with the real failure reason
                 if isinstance(last_result, dict) and last_result.get("__execution_error__"):
                     err_msg = last_result.get("message", "Execution failed.")
                     display = f"Could not complete: {err_msg}"
@@ -1494,47 +1342,38 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             last_tool = last_step.get("tool", "")
             user_q    = last_step.get("note", "") or req.message
 
-
-
-            # ── Extract pagination metadata BEFORE routing ────────────────
+            # Extract pagination metadata BEFORE routing
             paginate_meta = None
             if isinstance(last_result, dict):
                 paginate_meta = last_result.pop("__paginate__", None)
 
-            # ── Routing: 4-tier dispatch ──────────────────────────────────
+            # ── 4-tier routing ────────────────────────────────────
             t_summ_start  = time.monotonic()
             query_class   = _classify_query(user_q)
             is_action_tool = any(w in last_tool.lower() for w in
                                  ("create","update","delete","void","send","submit","mark"))
 
-            # Extract records + apply Python filters (name/date/status)
             list_key, all_records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
             filtered_records = _python_filter_records(all_records, user_q)
             _page1_col_keys: list[str] = []
 
             if is_action_tool:
-                # Tier 1 — Action result: Gemini writes a natural status message
+                # Tier 1: Action — Gemini writes natural status message
                 structured = await _gemini_summarize_single(
                     a.gemini, last_tool, user_q, last_result, cid
                 )
 
             elif query_class == "python_math":
-                # Tier 2 — Exact math: Python computes totals/counts/profit
-                # Uses ALL step results so multi-tool queries (profit = invoices - bills) work.
+                # Tier 2: Math — Python computes exact totals/counts/profit
                 structured = _python_aggregate(user_q, last_tool, all_step_results)
 
             elif query_class == "gemini_analysis" or (
                 len(filtered_records) == 1 and not is_action_tool
             ):
-                # Tier 3 — Analytical / single-record: Gemini answers with full data
-                # For analytical queries (rankings, comparisons, trends, "top N", "who", etc.)
-                # we give Gemini the complete filtered dataset as a compact JSON.
-                # Gemini has full context to rank, compare, group, or summarize.
+                # Tier 3: Analytical — Gemini with full filtered dataset
                 if len(filtered_records) == 0:
                     structured = _python_no_records(user_q, last_tool)
                 else:
-                    # Build a compact record set for Gemini — keep key fields only
-                    # to avoid hitting token limits on large datasets.
                     _KEY_FIELDS = frozenset({
                         "invoice_number","bill_number","customer_name","vendor_name",
                         "contact_name","name","date","due_date","total","balance",
@@ -1546,7 +1385,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         for r in filtered_records if isinstance(r, dict)
                     ]
                     gemini_payload = {
-                        "records": compact[:500],   # cap at 500 records for token safety
+                        "records": compact[:500],
                         "total_records": len(filtered_records),
                     }
                     structured = await _gemini_summarize_single(
@@ -1554,7 +1393,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     )
 
             else:
-                # Tier 4 — Plain list/filter: Python table (fast, no AI needed)
+                # Tier 4: Plain list — Python table (fast, no AI)
                 if len(filtered_records) == 0:
                     structured = _python_no_records(user_q, last_tool)
                 else:
@@ -1569,9 +1408,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             log.info("summarize_latency", extra={
                 "cid": cid, "ms": int((time.monotonic()-t_summ_start)*1000),
                 "filtered_count": len(filtered_records),
-                "aggregate": _user_wants_aggregation(user_q),
+                "query_class": query_class,
             })
-            # ── Emit tokens ───────────────────────────────────────────────
+
+            # Emit tokens
             reply_md = structured_to_markdown(structured)
             CHUNK = 80
             for i in range(0, len(reply_md), CHUNK):
@@ -1586,7 +1426,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             yield sse({"type": "done", "structured": client_structured,
                        "session_id": sess.session_id, "tools_used": tools_used})
 
-            # ── Background pagination ──────────────────────────────────────
+            # Background pagination
             if paginate_meta:
                 pg_tool  = paginate_meta["tool"]
                 pg_args  = dict(paginate_meta["args"])
@@ -1611,7 +1451,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     if not page_records:
                         break
 
-                    # Apply same Python filter to paginated records
                     page_filtered = _python_filter_records(page_records, user_q)
                     total_fetched += len(page_filtered)
                     has_more       = _has_more_pages(page_result)
@@ -1619,7 +1458,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     rows = [[str(r.get(c, "")) for c in col_keys]
                             for r in page_filtered if isinstance(r, dict)]
 
-                    # Only emit if there are matching rows on this page
                     if rows:
                         yield sse({
                             "type":         "table_append",
