@@ -465,7 +465,20 @@ def _build_table_structured(result: Any, tool_name: str,
 
 
 def structured_to_markdown(data: dict) -> str:
+    _FMTS = frozenset({"table", "answer", "panel", "status"})
+    # Safety: if the whole dict was accidentally serialized into a string field,
+    # detect and unwrap it before rendering.
     fmt = data.get("format", "status")
+    if fmt in _FMTS:
+        answer_val = data.get("answer", "")
+        if isinstance(answer_val, str) and answer_val.strip().startswith('{"format"'):
+            try:
+                inner = json.loads(answer_val)
+                if isinstance(inner, dict) and inner.get("format") in _FMTS:
+                    data = inner
+                    fmt  = data.get("format", "status")
+            except Exception:
+                pass
 
     if fmt == "answer":
         question  = data.get("question", "")
@@ -1197,8 +1210,33 @@ async def _gemini_summarize_single(gemini_client, tool_name: str,
     cleaned = _re.sub(r"^```(?:json)?\s*|\s*```$", "", buf.strip(), flags=_re.MULTILINE).strip()
     try:
         parsed = json.loads(cleaned)
+
+        # Guard: Gemini sometimes double-encodes — the outer object has
+        # "answer" = "<entire JSON string>" instead of being the structured
+        # response itself.  Detect and unwrap one level.
+        if isinstance(parsed, dict) and "answer" in parsed:
+            answer_val = parsed["answer"]
+            if isinstance(answer_val, str) and answer_val.strip().startswith("{"):
+                try:
+                    inner = json.loads(answer_val)
+                    if isinstance(inner, dict) and inner.get("format") in _VALID_FORMATS:
+                        log.info("gemini_double_encoded_unwrapped", extra={"cid": cid})
+                        parsed = inner
+                except Exception:
+                    pass  # not double-encoded, use outer as-is
+
         return _sanitize_structured(parsed, user_q)
     except Exception:
+        # Last resort: if cleaned itself looks like a valid structured JSON, try once more
+        # (handles cases where response_mime_type wrapping adds extra text)
+        try:
+            idx_start = cleaned.find("{")
+            if idx_start > 0:
+                inner_try = json.loads(cleaned[idx_start:])
+                if isinstance(inner_try, dict) and inner_try.get("format") in _VALID_FORMATS:
+                    return _sanitize_structured(inner_try, user_q)
+        except Exception:
+            pass
         return {"format": "answer", "question": user_q,
                 "answer": cleaned[:400] if cleaned else "No result.",
                 "breakdown": [], "note": ""}
