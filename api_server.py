@@ -1139,6 +1139,97 @@ def _python_aggregate(user_q: str, tool_name: str,
     }
 
 
+def _is_ranking_query(user_q: str) -> bool:
+    """Return True when the question asks for a ranking / top-N / bottom-N breakdown."""
+    q = user_q.lower()
+    return bool(
+        re.search(r'\btop\s*\d+\b', q) or
+        re.search(r'\bbottom\s*\d+\b', q) or
+        re.search(r'\bhighest\b', q) or
+        re.search(r'\blowest\b', q) or
+        re.search(r'\blargest\b', q) or
+        re.search(r'\bsmallest\b', q) or
+        re.search(r'\bbiggest\b', q) or
+        re.search(r'\branking\b', q) or
+        re.search(r'\branked\b', q) or
+        re.search(r'\bbest\b', q) or
+        re.search(r'\bworst\b', q) or
+        re.search(r'\bmost\b', q) or
+        re.search(r'\bleast\b', q) or
+        re.search(r'\bwho\s+(?:owe|paid|bought|has)\b', q)
+    )
+
+
+def _python_rank(user_q: str, tool_name: str, records: list) -> dict:
+    """
+    Pure-Python ranking: group by entity (customer/vendor), sum amounts,
+    sort, return top/bottom N as a formatted answer.  No Gemini needed.
+    """
+    q = user_q.lower()
+
+    # How many to show?
+    top_n = 10  # default
+    m = re.search(r'\b(?:top|bottom)\s*(\d+)\b', q)
+    if m:
+        top_n = int(m.group(1))
+
+    bottom = bool(re.search(r'\bbottom\b|\blowest\b|\bsmallest\b|\bworst\b|\bleast\b', q))
+
+    # What amount field to use?
+    wants_balance = any(w in q for w in ("outstanding", "owed", "receivable",
+                                          "payable", "balance", "unpaid",
+                                          "pending", "to receive", "to pay",
+                                          "to collect", "due"))
+    wants_count = bool(re.search(r'\bmost\s+(?:invoice|bill|order|purchase|record)\b', q) or
+                       re.search(r'\bby\s+(?:volume|count|number|frequency)\b', q))
+    prefer_total = not wants_balance
+
+    # Group by entity
+    entity_totals: dict[str, float] = {}
+    entity_counts: dict[str, int]   = {}
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        name = _entity_name(rec)
+        amt  = _get_amount(rec, prefer_total=prefer_total)
+        entity_totals[name] = entity_totals.get(name, 0.0) + amt
+        entity_counts[name] = entity_counts.get(name, 0)  + 1
+
+    if not entity_totals:
+        return _python_no_records(user_q, tool_name)
+
+    # Sort
+    sort_key = (lambda x: x[1]) if bottom else (lambda x: -x[1])
+    ranked = sorted(entity_totals.items(), key=sort_key)[:top_n]
+
+    direction = "Bottom" if bottom else "Top"
+    label_type = "by volume" if wants_count else ("by outstanding balance" if wants_balance else "by value")
+
+    # Build breakdown rows
+    breakdown = []
+    for i, (name, amt) in enumerate(ranked, 1):
+        cnt   = entity_counts[name]
+        label = f"{i}. {name}"
+        value = f"{cnt} invoices" if wants_count else f"{_fmt_inr(amt)} ({cnt} records)"
+        breakdown.append([label, value])
+
+    top_name, top_amt = ranked[0]
+    top_cnt = entity_counts[top_name]
+    if wants_count:
+        answer_text = (f"{top_name} leads with {top_cnt} records.")
+    else:
+        answer_text = (f"{top_name} is the {direction.lower()} customer "
+                       f"with {_fmt_inr(top_amt)} across {top_cnt} invoices.")
+
+    return {
+        "format":    "answer",
+        "question":  user_q,
+        "answer":    answer_text,
+        "breakdown": breakdown,
+        "note":      f"Ranked {direction} {top_n} {label_type} · {len(records)} total records",
+    }
+
+
 _VALID_FORMATS = frozenset({"table", "answer", "panel", "status"})
 
 
@@ -1201,8 +1292,10 @@ async def _gemini_summarize_single(gemini_client, tool_name: str,
                 buf += chunk.text or ""
         await asyncio.wait_for(_collect(), timeout=GEMINI_TIMEOUT)
     except asyncio.TimeoutError:
-        return {"format": "status", "ok": True,
-                "headline": "Response timed out.", "detail": str(result)[:300]}
+        log.warning("gemini_summarize_timeout", extra={"cid": cid, "tool": tool_name})
+        return {"format": "status", "ok": False,
+                "headline": "Analysis timed out — please try a more specific query.",
+                "detail": ""}
     except Exception as exc:
         log.warning("gemini_single_error", extra={"cid": cid, "error": str(exc)})
         return {"format": "status", "ok": True, "headline": "Done.", "detail": ""}
@@ -1441,23 +1534,56 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             elif query_class == "gemini_analysis" or (
                 len(filtered_records) == 1 and not is_action_tool
             ):
-                # Tier 3: Analytical — Gemini with full filtered dataset
+                # Tier 3: Analytical
                 if len(filtered_records) == 0:
                     structured = _python_no_records(user_q, last_tool)
+
+                elif len(filtered_records) == 1:
+                    # Single record — panel via Gemini
+                    structured = await _gemini_summarize_single(
+                        a.gemini, last_tool, user_q, last_result, cid
+                    )
+
+                elif _is_ranking_query(user_q):
+                    # Ranking / top-N / bottom-N — pure Python, no Gemini, instant
+                    structured = _python_rank(user_q, last_tool, filtered_records)
+
                 else:
+                    # Other analytics (trend, compare, breakdown) — Gemini with
+                    # pre-aggregated compact payload, NOT raw records
                     _KEY_FIELDS = frozenset({
                         "invoice_number","bill_number","customer_name","vendor_name",
                         "contact_name","name","date","due_date","total","balance",
                         "balance_due","amount","status","invoice_id","bill_id",
                         "contact_id","currency_code","sub_total",
                     })
-                    compact = [
-                        {k: v for k, v in r.items() if k in _KEY_FIELDS}
-                        for r in filtered_records if isinstance(r, dict)
+                    # Pre-aggregate by entity to keep payload tiny
+                    entity_totals: dict[str, float] = {}
+                    entity_counts: dict[str, int]   = {}
+                    entity_dates:  dict[str, list]  = {}
+                    for rec in filtered_records:
+                        if not isinstance(rec, dict):
+                            continue
+                        name = _entity_name(rec)
+                        amt  = _get_amount(rec, prefer_total=True)
+                        entity_totals[name] = entity_totals.get(name, 0.0) + amt
+                        entity_counts[name] = entity_counts.get(name, 0)  + 1
+                        d = rec.get("date") or rec.get("due_date") or ""
+                        if d:
+                            entity_dates.setdefault(name, []).append(d)
+                    agg_rows = [
+                        {
+                            "entity":        name,
+                            "total_amount":  round(tot, 2),
+                            "record_count":  entity_counts[name],
+                            "latest_date":   max(entity_dates.get(name, [""])),
+                        }
+                        for name, tot in sorted(entity_totals.items(), key=lambda x: -x[1])[:100]
                     ]
                     gemini_payload = {
-                        "records": compact[:500],
-                        "total_records": len(filtered_records),
+                        "aggregated_by_entity": agg_rows,
+                        "total_records":        len(filtered_records),
+                        "note": "Pre-aggregated from raw records. Use these rows to answer the question.",
                     }
                     structured = await _gemini_summarize_single(
                         a.gemini, last_tool, user_q, gemini_payload, cid
