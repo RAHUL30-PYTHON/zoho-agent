@@ -343,7 +343,7 @@ async def api_summarize(
     elif query_class == "python_math":
         return _python_aggregate(user_question, tool, [result])
     elif query_class == "gemini_analysis" or len(filtered) == 1:
-        target = filtered[0] if len(filtered) == 1 else {"records": filtered[:500], "total_records": len(filtered)}
+        target = filtered[0] if len(filtered) == 1 else {"records": filtered[:200], "total_records": len(filtered)}
         return await _gemini_summarize_single(gemini, tool, user_question, target, cid)
     elif len(filtered) == 0 and all_records:
         return _python_no_records(user_question, tool)
@@ -866,35 +866,25 @@ def _python_filter_records(records: list, user_question: str) -> list:
 
     if candidate_words:
         best_name = ""
-        # for length in range(min(6, len(candidate_words)), 0, -1):
-        #     for start in range(len(candidate_words) - length + 1):
-        #         chunk = " ".join(candidate_words[start:start + length])
-        #         for rec in records[:100]:
-        #             if not isinstance(rec, dict):
-        #                 continue
-        #             for nf in _NAME_FIELDS:
-        #                 val = str(rec.get(nf, "")).lower()
-        #                 if chunk in val and len(chunk) > len(best_name):
-        #                     best_name = chunk
-        #         if best_name:
-        #             break
-        all_name_values: list[str] = []
+        # Build a set of all unique name-field values across ALL records (not just first 100)
+        # so we can match "ebix technologies" even if it only appears on page 5.
+        all_name_values: list[tuple[str, str]] = []
         for rec in records:
-            if isinstance(rec, dict):
-                for nf in _NAME_FIELDS:
-                    val = str(rec.get(nf, "")).lower()
-                    if val:
-                        all_name_values.append(val)
+            if not isinstance(rec, dict):
+                continue
+            for nf in _NAME_FIELDS:
+                val = str(rec.get(nf, "")).lower()
+                if val:
+                    all_name_values.append((nf, val))
 
         for length in range(min(6, len(candidate_words)), 0, -1):
             for start in range(len(candidate_words) - length + 1):
                 chunk = " ".join(candidate_words[start:start + length])
-                for val in all_name_values:
+                for _nf, val in all_name_values:
                     if chunk in val and len(chunk) > len(best_name):
                         best_name = chunk
                 if best_name:
                     break
-           
             if best_name:
                 break
 
@@ -1019,6 +1009,263 @@ def _entity_name(rec: dict) -> str:
         if rec.get(f):
             return str(rec[f])
     return "(unknown)"
+
+
+# ---------------------------------------------------------------------------
+# SQLite-based SQL engine
+# ---------------------------------------------------------------------------
+import sqlite3 as _sqlite3
+
+_SQL_GEN_SYSTEM = """
+You are a SQL expert. Given a SQLite table schema and a natural-language question,
+write a single valid SQLite SELECT query that answers the question.
+
+RULES:
+- Use LOWER() and LIKE for name/text matching — e.g. LOWER(customer_name) LIKE '%ebix%'
+- Use CAST(column AS REAL) for numeric operations on text-typed columns
+- For "top N" / "bottom N": use ORDER BY ... DESC/ASC LIMIT N
+- For totals/sums: use SUM(), COUNT(), AVG()
+- For "unpaid"/"outstanding": WHERE LOWER(status) IN ('sent','overdue','open','partial')
+- For "paid": WHERE LOWER(status) = 'paid'
+- For date ranges: use WHERE date >= '2025-01-01' AND date <= '2025-01-31' (ISO format)
+- Always alias computed columns: SUM(total) AS total_amount
+- Return ONLY the SQL statement — no explanation, no markdown, no backticks.
+""".strip()
+
+
+def _records_to_sqlite(records: list[dict]) -> tuple:
+    """
+    Load a list of dicts into an in-memory SQLite table.
+    Returns (conn, table_name, column_names, schema_desc, sample_rows_str).
+    """
+    if not records:
+        return None, "records", [], "", ""
+
+    # Collect all column names in order of first appearance
+    all_keys: list[str] = []
+    seen: set[str] = set()
+    for rec in records:
+        if isinstance(rec, dict):
+            for k in rec:
+                if k not in seen:
+                    all_keys.append(k)
+                    seen.add(k)
+
+    # Create table — all columns as TEXT (SQLite will CAST as needed)
+    conn = _sqlite3.connect(":memory:")
+    safe_cols = [f'"{k}"' for k in all_keys]
+    conn.execute(f"CREATE TABLE records ({', '.join(c + ' TEXT' for c in safe_cols)})")
+
+    # Insert rows in batches
+    placeholders = ", ".join("?" * len(all_keys))
+    batch = []
+    for rec in records:
+        if isinstance(rec, dict):
+            row = [str(rec.get(k, "")) if rec.get(k) is not None else "" for k in all_keys]
+            batch.append(row)
+        if len(batch) >= 500:
+            conn.executemany(f"INSERT INTO records VALUES ({placeholders})", batch)
+            batch = []
+    if batch:
+        conn.executemany(f"INSERT INTO records VALUES ({placeholders})", batch)
+    conn.commit()
+
+    # Build schema description for Gemini (compact)
+    schema_desc = f"Table: records\nColumns: {', '.join(all_keys)}\nRow count: {len(records)}"
+
+    # 3 sample rows as compact JSON
+    sample = []
+    for rec in records[:3]:
+        if isinstance(rec, dict):
+            # Only show non-empty fields in sample
+            sample.append({k: rec[k] for k in all_keys if rec.get(k)})
+    sample_str = json.dumps(sample, default=str, ensure_ascii=False)
+
+    return conn, "records", all_keys, schema_desc, sample_str
+
+
+async def _gemini_gen_sql(
+    gemini_client,
+    user_q: str,
+    schema_desc: str,
+    sample_str: str,
+    cid: str,
+) -> str:
+    """Ask Gemini to generate a SQL query. Returns the SQL string."""
+    prompt = (
+        f"SCHEMA:\n{schema_desc}\n\n"
+        f"SAMPLE ROWS (3):\n{sample_str}\n\n"
+        f"QUESTION: {user_q}\n\n"
+        f"Write the SQLite SELECT query:"
+    )
+    buf = ""
+    try:
+        async def _collect():
+            nonlocal buf
+            async for chunk in await gemini_client.aio.models.generate_content_stream(
+                model=MODEL,
+                contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=prompt)])],
+                config=gtypes.GenerateContentConfig(
+                    system_instruction=_SQL_GEN_SYSTEM,
+                    temperature=0.0,
+                    max_output_tokens=512,
+                ),
+            ):
+                buf += chunk.text or ""
+        await asyncio.wait_for(_collect(), timeout=15)
+    except Exception as exc:
+        log.warning("sql_gen_error", extra={"cid": cid, "error": str(exc)})
+        return ""
+
+    # Strip markdown fences if present
+    sql = re.sub(r"^```(?:sql)?\s*|\s*```$", "", buf.strip(), flags=re.MULTILINE).strip()
+    # Safety: only allow SELECT
+    if not sql.upper().lstrip().startswith("SELECT"):
+        log.warning("sql_gen_not_select", extra={"cid": cid, "sql": sql[:120]})
+        return ""
+    return sql
+
+
+def _run_sql(conn, sql: str) -> tuple[list[str], list[list], str]:
+    """Execute SQL on the connection. Returns (columns, rows, error_msg)."""
+    try:
+        cur = conn.execute(sql)
+        columns = [d[0] for d in cur.description] if cur.description else []
+        rows    = [[str(v) if v is not None else "" for v in row] for row in cur.fetchall()]
+        return columns, rows, ""
+    except Exception as exc:
+        return [], [], str(exc)
+
+
+def _sql_result_to_structured(user_q: str, tool_name: str,
+                               sql: str, columns: list[str],
+                               rows: list[list]) -> dict:
+    """Convert SQL result columns+rows into a display-ready structured dict."""
+    n = len(rows)
+    if n == 0:
+        entity = tool_name.replace("ZohoBooks_list_", "").replace("ZohoBooks_get_", "").replace("_", " ")
+        return {
+            "format": "answer",
+            "question": user_q,
+            "answer": f"No {entity} records found matching your query.",
+            "breakdown": [],
+            "note": f"SQL returned 0 rows · {sql[:120]}",
+        }
+
+    # Detect if this is an aggregate result (1 row of computed values)
+    # or a list result (multiple rows of raw records)
+    is_aggregate = (
+        n == 1 and
+        any(c.lower() in ("total_amount", "count", "avg", "sum", "total", "grand_total",
+                           "invoice_count", "bill_count", "record_count")
+            for c in columns)
+    )
+
+    if is_aggregate:
+        row = rows[0]
+        # Primary answer is the first numeric-looking column
+        answer_col, answer_val = columns[0], row[0]
+        for col, val in zip(columns, row):
+            try:
+                float(val)
+                answer_col, answer_val = col, val
+                break
+            except (ValueError, TypeError):
+                pass
+        # Try to format as INR if it looks like a money amount
+        try:
+            fv = float(answer_val)
+            if any(w in answer_col.lower() for w in ("amount","total","balance","sum","revenue","profit")):
+                answer_val = _fmt_inr(fv)
+        except (ValueError, TypeError):
+            pass
+
+        breakdown = [[col.replace("_", " ").title(), val] for col, val in zip(columns, row)]
+        return {
+            "format":    "answer",
+            "question":  user_q,
+            "answer":    f"{answer_val}",
+            "breakdown": breakdown,
+            "note":      f"computed via SQL · {n} result row(s)",
+        }
+
+    # Multi-row result — show as table
+    # Format amount-like columns as INR
+    amount_cols = {i for i, c in enumerate(columns)
+                   if any(w in c.lower() for w in ("amount","total","balance","price","rate","sub_total"))}
+    formatted_rows = []
+    for row in rows:
+        fr = []
+        for i, val in enumerate(row):
+            if i in amount_cols:
+                try:
+                    fr.append(_fmt_inr(float(val)))
+                except (ValueError, TypeError):
+                    fr.append(val)
+            else:
+                fr.append(val)
+        formatted_rows.append(fr)
+
+    col_headers = [c.replace("_", " ").title() for c in columns]
+    title = tool_name.replace("ZohoBooks_", "").replace("_", " ").title()
+    footer = f"Showing {n} records"
+    # Add total for amount columns
+    for i, col in enumerate(columns):
+        if i in amount_cols:
+            try:
+                col_sum = sum(float(r[i]) for r in rows)
+                footer += f"  ·  Total {col.replace('_',' ').title()}: {_fmt_inr(col_sum)}"
+                break
+            except (ValueError, TypeError):
+                pass
+
+    return {
+        "format":  "table",
+        "title":   title,
+        "columns": col_headers,
+        "col_keys": columns,
+        "rows":    formatted_rows,
+        "footer":  footer,
+    }
+
+
+async def _sql_query_records(
+    gemini_client,
+    user_q: str,
+    tool_name: str,
+    records: list[dict],
+    cid: str,
+) -> dict:
+    """
+    Full SQL pipeline:
+      1. Load records → SQLite
+      2. Gemini generates SQL (sees schema + 3 rows only, not all data)
+      3. Execute SQL
+      4. Format result
+    Falls back to _python_no_records on failure.
+    """
+    if not records:
+        return _python_no_records(user_q, tool_name)
+
+    conn, _, columns, schema_desc, sample_str = _records_to_sqlite(records)
+    if conn is None:
+        return _python_no_records(user_q, tool_name)
+
+    sql = await _gemini_gen_sql(gemini_client, user_q, schema_desc, sample_str, cid)
+    if not sql:
+        log.warning("sql_gen_empty", extra={"cid": cid, "question": user_q[:80]})
+        return _python_no_records(user_q, tool_name)
+
+    log.info("sql_executing", extra={"cid": cid, "sql": sql[:200]})
+    col_names, rows, err = _run_sql(conn, sql)
+    conn.close()
+
+    if err:
+        log.warning("sql_exec_error", extra={"cid": cid, "error": err, "sql": sql[:200]})
+        # Fallback: return all records as a plain table
+        return _build_table_structured(None, tool_name, records_override=records)
+
+    return _sql_result_to_structured(user_q, tool_name, sql, col_names, rows)
 
 
 def _python_no_records(user_q: str, tool_name: str) -> dict:
@@ -1494,35 +1741,44 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             if isinstance(last_result, dict):
                 paginate_meta = last_result.pop("__paginate__", None)
 
-            # ── 4-tier routing ────────────────────────────────────
-            t_summ_start  = time.monotonic()
-            query_class   = _classify_query(user_q)
+            # ── Routing ────────────────────────────────────────────
+            t_summ_start   = time.monotonic()
+            query_class    = _classify_query(user_q)
             is_action_tool = any(w in last_tool.lower() for w in
                                  ("create","update","delete","void","send","submit","mark"))
 
-            # ── Eager full pagination for math/analytics queries ──────────────
-            # Background pagination (table_append SSE) only feeds the UI table.
-            # For math and analytics we MUST have ALL records before computing,
-            # so we eagerly paginate here, before any computation happens.
-            # For plain table queries the background loop handles it.
-            if (not is_action_tool
-                    and query_class in ("python_math", "gemini_analysis")
-                    and paginate_meta):
+            # ── Eager full pagination ─────────────────────────────────────────
+            # Always paginate eagerly when the query has any filter terms
+            # (name, date, status) or needs aggregation/analytics.
+            # This prevents the background pagination race condition where
+            # table_append events from the old stream append to the new table,
+            # causing duplicate rows.
+            # Background pagination (non-eager) is only used for plain
+            # "list everything" queries with no filters.
+            _q_lower = user_q.lower()
+            _has_filter_terms = bool(
+                re.search(r'\b(?:unpaid|overdue|paid|draft|outstanding|pending)\b', _q_lower) or
+                re.search(r'\b(?:january|february|march|april|may|june|july|august'
+                          r'|september|october|november|december'
+                          r'|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b', _q_lower) or
+                re.search(r'\b(?:in|for|during|of)\s+20\d{2}\b', _q_lower) or
+                bool(re.search(r'this month|last month', _q_lower)) or
+                any(w for w in re.findall(r'[a-z]+', _q_lower)
+                    if w not in _QUERY_STOPWORDS and len(w) > 2)
+            )
+
+            if (not is_action_tool and paginate_meta and
+                    (query_class in ("python_math", "gemini_analysis") or _has_filter_terms)):
                 pg_tool = paginate_meta["tool"]
                 pg_args = dict(paginate_meta["args"])
-                log.info("eager_paginate_start", extra={
-                    "tool": pg_tool, "query_class": query_class, "cid": cid
-                })
-                # yield a quick status so the user knows we're fetching more data
-                yield sse({"type": "token", "token": "⏳ Fetching all pages for accurate totals…"})
+                log.info("eager_paginate_start", extra={"tool": pg_tool, "cid": cid})
+                yield sse({"type": "token", "token": "⏳ Fetching all pages…"})
                 await asyncio.sleep(0)
-
                 try:
                     fully_paginated = await _autopaginate(
                         sess.mcp_session, pg_tool, pg_args, last_result, a.audit, cid
                     )
                     last_result = fully_paginated
-                    # Replace the last entry in all_step_results with the fully paginated result
                     if all_step_results:
                         all_step_results[-1] = fully_paginated
                     paginate_meta = None  # consumed — no background pagination needed
@@ -1538,14 +1794,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             _page1_col_keys: list[str] = []
 
             if is_action_tool:
-                # Tier 1: Action — Gemini writes natural status message
+                # Tier 1: Action
                 structured = await _gemini_summarize_single(
                     a.gemini, last_tool, user_q, last_result, cid
                 )
 
             elif query_class == "python_math":
-                # Tier 2: Math — Python computes exact totals/counts/profit
-                # all_step_results now contains fully paginated data for the last step
+                # Tier 2: Math — Python aggregation
                 structured = _python_aggregate(user_q, last_tool, all_step_results)
 
             elif query_class == "gemini_analysis" or (
@@ -1554,27 +1809,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 # Tier 3: Analytical
                 if len(filtered_records) == 0:
                     structured = _python_no_records(user_q, last_tool)
-
                 elif len(filtered_records) == 1:
-                    # Single record — panel via Gemini
                     structured = await _gemini_summarize_single(
-                        a.gemini, last_tool, user_q, last_result, cid
+                        a.gemini, last_tool, user_q, filtered_records[0], cid
                     )
-
                 elif _is_ranking_query(user_q):
-                    # Ranking / top-N / bottom-N — pure Python, no Gemini, instant
                     structured = _python_rank(user_q, last_tool, filtered_records)
-
                 else:
-                    # Other analytics (trend, compare, breakdown) — Gemini with
-                    # pre-aggregated compact payload, NOT raw records
-                    _KEY_FIELDS = frozenset({
-                        "invoice_number","bill_number","customer_name","vendor_name",
-                        "contact_name","name","date","due_date","total","balance",
-                        "balance_due","amount","status","invoice_id","bill_id",
-                        "contact_id","currency_code","sub_total",
-                    })
-                    # Pre-aggregate by entity to keep payload tiny
                     entity_totals: dict[str, float] = {}
                     entity_counts: dict[str, int]   = {}
                     entity_dates:  dict[str, list]  = {}
@@ -1589,25 +1830,18 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         if d:
                             entity_dates.setdefault(name, []).append(d)
                     agg_rows = [
-                        {
-                            "entity":        name,
-                            "total_amount":  round(tot, 2),
-                            "record_count":  entity_counts[name],
-                            "latest_date":   max(entity_dates.get(name, [""])),
-                        }
+                        {"entity": name, "total_amount": round(tot, 2),
+                         "record_count": entity_counts[name],
+                         "latest_date": max(entity_dates.get(name, [""]))}
                         for name, tot in sorted(entity_totals.items(), key=lambda x: -x[1])[:100]
                     ]
-                    gemini_payload = {
-                        "aggregated_by_entity": agg_rows,
-                        "total_records":        len(filtered_records),
-                        "note": "Pre-aggregated from raw records. Use these rows to answer the question.",
-                    }
                     structured = await _gemini_summarize_single(
-                        a.gemini, last_tool, user_q, gemini_payload, cid
+                        a.gemini, last_tool, user_q,
+                        {"aggregated_by_entity": agg_rows, "total_records": len(filtered_records)}, cid
                     )
 
             else:
-                # Tier 4: Plain list — Python table (fast, no AI)
+                # Tier 4: Plain list table
                 if len(filtered_records) == 0:
                     structured = _python_no_records(user_q, last_tool)
                 else:
@@ -1621,7 +1855,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
             log.info("summarize_latency", extra={
                 "cid": cid, "ms": int((time.monotonic()-t_summ_start)*1000),
-                "filtered_count": len(filtered_records),
+                "filtered_count": len(filtered_records) if "filtered_records" in dir() else 0,
                 "query_class": query_class,
             })
 
@@ -1640,13 +1874,14 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             yield sse({"type": "done", "structured": client_structured,
                        "session_id": sess.session_id, "tools_used": tools_used})
 
-            # Background pagination
+            # Background pagination — for plain list queries where we showed page 1
+            # and more pages exist, stream additional rows to the UI table
             if paginate_meta:
                 pg_tool  = paginate_meta["tool"]
                 pg_args  = dict(paginate_meta["args"])
-                col_keys = _page1_col_keys or _detect_cols(filtered_records, pg_tool)
+                col_keys = _page1_col_keys or _detect_cols(all_records, pg_tool)
                 page     = 2
-                total_fetched = len(filtered_records)
+                total_fetched = len(all_records)
 
                 while page <= MAX_AUTOPAGINATE_PAGES:
                     pg_args["page"] = page
@@ -1665,7 +1900,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     if not page_records:
                         break
 
-                    page_filtered = _python_filter_records(page_records, user_q)
+                    # Apply the same filter as the initial page so we don't
+                    # append records that don't match the user's query.
+                    page_filtered  = _python_filter_records(page_records, user_q)
                     total_fetched += len(page_filtered)
                     has_more       = _has_more_pages(page_result)
 
@@ -1740,4 +1977,3 @@ BASE_DIR = Path(__file__).resolve().parent
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return FileResponse(BASE_DIR / "favicon.ico", media_type="image/x-icon")
-
