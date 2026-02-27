@@ -54,6 +54,7 @@ from zoho_agent import (
     MODEL,
     PLANNER_MODEL,
     TOOL_TIMEOUT,
+    _autopaginate,
     _estimate_tokens,
     _extract_records,
     _has_more_pages,
@@ -819,13 +820,11 @@ def _python_filter_records(records: list, user_question: str) -> list:
             filters_applied = True
 
     if not date_prefix:
-        m = re.search(r'\bin\s+(20\d{2})\b', q)
-        if m:
-            date_prefix = m.group(1)
-            filters_applied = True
-
-    if not date_prefix:
-        m = re.search(r'\b(20\d{2})\b', q)
+        # Only match year when there is explicit date intent: "in 2025", "for 2026", "during 2024"
+        # We intentionally do NOT use bare \b(20\d{2})\b because queries like
+        # "invoices from Punjab National Bank" have no date intent and the loose
+        # match causes false-positive filtering that silently drops records.
+        m = re.search(r'\b(?:in|for|during|of)\s+(20\d{2})\b', q)
         if m:
             date_prefix = m.group(1)
             filters_applied = True
@@ -1353,6 +1352,39 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             is_action_tool = any(w in last_tool.lower() for w in
                                  ("create","update","delete","void","send","submit","mark"))
 
+            # ── Eager full pagination for math/analytics queries ──────────────
+            # Background pagination (table_append SSE) only feeds the UI table.
+            # For math and analytics we MUST have ALL records before computing,
+            # so we eagerly paginate here, before any computation happens.
+            # For plain table queries the background loop handles it.
+            if (not is_action_tool
+                    and query_class in ("python_math", "gemini_analysis")
+                    and paginate_meta):
+                pg_tool = paginate_meta["tool"]
+                pg_args = dict(paginate_meta["args"])
+                log.info("eager_paginate_start", extra={
+                    "tool": pg_tool, "query_class": query_class, "cid": cid
+                })
+                # yield a quick status so the user knows we're fetching more data
+                yield sse({"type": "token", "token": "⏳ Fetching all pages for accurate totals…"})
+                await asyncio.sleep(0)
+
+                try:
+                    fully_paginated = await _autopaginate(
+                        sess.mcp_session, pg_tool, pg_args, last_result, a.audit, cid
+                    )
+                    last_result = fully_paginated
+                    # Replace the last entry in all_step_results with the fully paginated result
+                    if all_step_results:
+                        all_step_results[-1] = fully_paginated
+                    paginate_meta = None  # consumed — no background pagination needed
+                    _, full_records = _extract_records(last_result)
+                    log.info("eager_paginate_done", extra={
+                        "tool": pg_tool, "total_records": len(full_records), "cid": cid
+                    })
+                except Exception as _pg_exc:
+                    log.warning("eager_paginate_failed", extra={"error": str(_pg_exc), "cid": cid})
+
             list_key, all_records = _extract_records(last_result) if isinstance(last_result, dict) else ("", [])
             filtered_records = _python_filter_records(all_records, user_q)
             _page1_col_keys: list[str] = []
@@ -1365,6 +1397,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
             elif query_class == "python_math":
                 # Tier 2: Math — Python computes exact totals/counts/profit
+                # all_step_results now contains fully paginated data for the last step
                 structured = _python_aggregate(user_q, last_tool, all_step_results)
 
             elif query_class == "gemini_analysis" or (
