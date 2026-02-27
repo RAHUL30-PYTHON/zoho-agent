@@ -26,7 +26,7 @@
     --red-dim:      #ff4e6a18;
     --text:         #e8edf5;
     --text-2:       #c6c6c7;
-    --text-3:       #efefef;
+    --text-3:       #8a9ab0;
     --user-bg:      #0d1f1a;
     --user-border:  #00e5b030;
     --radius:       14px;
@@ -128,6 +128,18 @@
   .setup-panel { display: flex; flex-direction: column; gap: 24px; }
   .setup-panel.hidden { display: none; }
 
+  /* ── Saved credentials notice ────────────────────────────────── */
+  .saved-notice {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--accent-dim); border: 1px solid var(--accent-glow);
+    border-radius: var(--radius-sm); padding: 10px 14px;
+    font-size: 11.5px; font-family: var(--font-mono); color: var(--accent);
+  }
+  .saved-notice svg { width: 14px; height: 14px; flex-shrink: 0; }
+  .saved-notice-text { flex: 1; line-height: 1.5; }
+  .saved-notice-clear { cursor: pointer; text-decoration: underline; color: var(--text-3); font-size: 10px; white-space: nowrap; }
+  .saved-notice-clear:hover { color: var(--red); }
+
   /* ── Shell ──────────────────────────────────────────────────── */
   .shell { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: 100vh; height: 100vh; opacity: 0; pointer-events: none; transition: opacity .4s ease; }
   .shell.visible { opacity: 1; pointer-events: all; }
@@ -140,6 +152,21 @@
   .brand-name { font-size: 15px; font-weight: 700; letter-spacing: -.01em; color: var(--text); }
   .brand-tag  { font-size: 10px; font-family: var(--font-mono); color: var(--accent); letter-spacing: .08em; text-transform: uppercase; margin-top: 1px; }
 
+  /* Sidebar actions */
+  .sidebar-actions { padding: 10px 10px 4px; display: flex; flex-direction: column; gap: 4px; }
+  .sidebar-btn {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    border-radius: var(--radius-sm); border: 1px solid transparent;
+    font-size: 12px; font-family: var(--font-sans); font-weight: 600;
+    cursor: pointer; transition: var(--transition); color: var(--text-2);
+    background: transparent; width: 100%; text-align: left;
+  }
+  .sidebar-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+  .sidebar-btn:hover { background: var(--surface2); border-color: var(--border-hi); color: var(--text); }
+  .sidebar-btn.danger:hover { background: var(--red-dim); border-color: #ff4e6a30; color: var(--red); }
+  .sidebar-btn.accent-btn { color: var(--accent); }
+  .sidebar-btn.accent-btn:hover { background: var(--accent-dim); border-color: var(--accent-glow); }
+
   .sidebar-section { padding: 8px 16px 4px; font-size: 10px; font-family: var(--font-mono); color: var(--text-3); letter-spacing: .1em; text-transform: uppercase; }
   .history-list { flex: 1; overflow-y: auto; padding: 4px 10px 16px; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
   .history-item { padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; display: flex; align-items: flex-start; gap: 8px; transition: var(--transition); }
@@ -151,6 +178,7 @@
 
   .sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
   .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); flex-shrink: 0; animation: pulse-dot 2.4s ease-in-out infinite; }
+  .status-dot.offline { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
   @keyframes pulse-dot { 0%,100% { opacity:1; box-shadow:0 0 8px var(--accent); } 50% { opacity:.5; box-shadow:0 0 3px var(--accent); } }
   .status-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-family: var(--font-mono); color: var(--text-3); }
   .status-row span { color: var(--text-2); }
@@ -168,6 +196,17 @@
   .badge-model { background: var(--surface2); border: 1px solid var(--border-hi); color: var(--text-2); }
   .badge-tools { background: var(--accent-dim); border: 1px solid var(--accent-glow); color: var(--accent); }
 
+  /* Header reset button */
+  .header-reset-btn {
+    display: flex; align-items: center; gap: 5px;
+    padding: 5px 10px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border-hi); background: transparent;
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3);
+    cursor: pointer; transition: var(--transition);
+  }
+  .header-reset-btn svg { width: 12px; height: 12px; }
+  .header-reset-btn:hover { background: var(--red-dim); border-color: #ff4e6a30; color: var(--red); }
+
   .messages { flex: 1; overflow-y: auto; padding: 32px 0 24px; position: relative; z-index: 1; scrollbar-width: thin; scrollbar-color: var(--border) transparent; scroll-behavior: smooth; }
   .messages-inner { max-width: 780px; margin: 0 auto; padding: 0 28px; display: flex; flex-direction: column; gap: 24px; }
 
@@ -176,6 +215,16 @@
   .empty-glyph svg { width: 32px; height: 32px; }
   .empty-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -.03em; }
   .empty-sub { font-size: 13.5px; color: var(--text-2); max-width: 380px; line-height: 1.7; font-family: var(--font-mono); }
+
+  /* Quick prompts */
+  .quick-prompts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 4px; }
+  .quick-prompt {
+    padding: 7px 14px; border-radius: 100px;
+    border: 1px solid var(--border-hi); background: var(--surface2);
+    font-size: 12px; font-family: var(--font-mono); color: var(--text-2);
+    cursor: pointer; transition: var(--transition);
+  }
+  .quick-prompt:hover { background: var(--accent-dim); border-color: var(--accent-glow); color: var(--accent); }
 
   .msg { display: flex; gap: 12px; animation: fade-up .25s ease both; }
   @keyframes fade-up { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
@@ -215,15 +264,9 @@
   /* ── Pagination Controls ─────────────────────────────────────── */
   .pagination-bar {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 8px 4px 4px;
-    border-top: 1px solid var(--border);
-    margin-top: 4px;
-    gap: 12px;
+    padding: 8px 4px 4px; border-top: 1px solid var(--border); margin-top: 4px; gap: 12px;
   }
-  .pagination-info {
-    font-size: 10.5px; font-family: var(--font-mono); color: var(--text-3);
-    white-space: nowrap; flex-shrink: 0;
-  }
+  .pagination-info { font-size: 10.5px; font-family: var(--font-mono); color: var(--text-3); white-space: nowrap; flex-shrink: 0; }
   .pagination-info strong { color: var(--text-2); }
   .pagination-controls { display: flex; align-items: center; gap: 4px; }
   .page-btn {
@@ -240,7 +283,6 @@
   .page-btn svg { width: 11px; height: 11px; }
   .page-dots { font-size: 11px; font-family: var(--font-mono); color: var(--text-3); padding: 0 2px; }
 
-  /* Loading indicator while streaming more pages */
   .table-loading-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-family: var(--font-mono); color: var(--accent); background: var(--accent-dim); border: 1px solid var(--accent-glow); border-radius: 100px; padding: 2px 8px; }
   .table-loading-dot { width: 5px; height: 5px; background: var(--accent); border-radius: 50%; animation: typing-bounce .9s ease-in-out infinite; }
   .table-loading-dot:nth-child(1){animation-delay:0s}
@@ -318,7 +360,47 @@
   .elapsed { font-size: 10px; font-family: var(--font-mono); color: var(--text-3); margin-left: 4px; }
   .toast { position: fixed; bottom: 90px; right: 24px; background: var(--red-dim); border: 1px solid #ff4e6a30; border-radius: var(--radius-sm); padding: 10px 16px; font-size: 12.5px; font-family: var(--font-mono); color: var(--red); max-width: 320px; z-index: 999; display: none; }
   .toast.show { display: block; animation: toast-in .2s ease both; }
+  .toast.success { background: var(--accent-dim); border-color: var(--accent-glow); color: var(--accent); }
   @keyframes toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+
+  /* Reset confirmation modal */
+  .reset-modal {
+    position: fixed; inset: 0; z-index: 9998;
+    background: #0a0c0f80; backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center;
+    animation: overlay-in .2s ease both;
+  }
+  .reset-modal.hidden { display: none; }
+  .reset-card {
+    background: var(--surface); border: 1px solid var(--border-hi);
+    border-radius: var(--radius); padding: 28px;
+    width: 100%; max-width: 380px;
+    display: flex; flex-direction: column; gap: 20px;
+    box-shadow: 0 24px 60px #00000050;
+    animation: card-in .25s cubic-bezier(.2,.8,.3,1) both;
+  }
+  .reset-card-title { font-size: 16px; font-weight: 700; color: var(--text); letter-spacing: -.01em; }
+  .reset-card-sub { font-size: 12.5px; color: var(--text-2); font-family: var(--font-mono); line-height: 1.6; margin-top: -12px; }
+  .reset-options { display: flex; flex-direction: column; gap: 8px; }
+  .reset-option {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 12px 14px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border-hi); cursor: pointer;
+    transition: var(--transition); background: transparent;
+    text-align: left; width: 100%;
+  }
+  .reset-option:hover { background: var(--surface2); }
+  .reset-option.selected { background: var(--accent-dim); border-color: var(--accent-glow); }
+  .reset-option-icon { width: 16px; height: 16px; flex-shrink: 0; margin-top: 1px; color: var(--text-3); }
+  .reset-option.selected .reset-option-icon { color: var(--accent); }
+  .reset-option-label { font-size: 12.5px; font-weight: 600; color: var(--text); }
+  .reset-option-desc { font-size: 11px; font-family: var(--font-mono); color: var(--text-3); margin-top: 2px; line-height: 1.4; }
+  .reset-btns { display: flex; gap: 8px; justify-content: flex-end; }
+  .reset-cancel-btn { padding: 8px 16px; border-radius: var(--radius-sm); border: 1px solid var(--border-hi); background: transparent; font-family: var(--font-sans); font-size: 13px; font-weight: 600; color: var(--text-2); cursor: pointer; transition: var(--transition); }
+  .reset-cancel-btn:hover { background: var(--surface2); color: var(--text); }
+  .reset-confirm-btn { padding: 8px 16px; border-radius: var(--radius-sm); border: none; background: var(--red); font-family: var(--font-sans); font-size: 13px; font-weight: 700; color: #fff; cursor: pointer; transition: var(--transition); }
+  .reset-confirm-btn:hover { filter: brightness(1.1); }
+
   @media (max-width: 760px) {
     .shell { grid-template-columns: 1fr; }
     .sidebar { display: none; }
@@ -354,6 +436,14 @@
     </div>
     <div class="setup-divider"></div>
     <div class="setup-panel" id="panel1">
+      <!-- Saved credentials notice (shown if cookies exist) -->
+      <div class="saved-notice hidden" id="savedNotice">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M20 6L9 17l-5-5"/>
+        </svg>
+        <div class="saved-notice-text" id="savedNoticeText">Credentials saved from previous session</div>
+        <span class="saved-notice-clear" onclick="clearSavedCredentials()">Clear</span>
+      </div>
       <div class="setup-field">
         <label class="setup-label" for="mcpUrlInput">MCP Server URL</label>
         <input id="mcpUrlInput" class="setup-input" type="url"
@@ -368,7 +458,7 @@
         <svg id="icon1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
         <span id="lbl1">Connect</span>
       </button>
-      <div class="setup-hint">The URL is stored for this browser session only<br>and sent with every request to the API.</div>
+      <div class="setup-hint">Credentials are saved in cookies for convenience.<br>Clear them anytime using the link above.</div>
     </div>
     <div class="setup-panel hidden" id="panel2">
       <div class="setup-field">
@@ -386,7 +476,50 @@
         <svg id="icon2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>
         <span id="lbl2">Start chatting</span>
       </button>
-      <div class="setup-hint">Your organisation ID is sent with every request<br>and only stored in this browser session.</div>
+      <div class="setup-hint">Your organisation ID is saved in cookies for convenience.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Reset Confirmation Modal ──────────────────────────────── -->
+<div class="reset-modal hidden" id="resetModal">
+  <div class="reset-card">
+    <div>
+      <div class="reset-card-title">Reset Chat</div>
+      <div class="reset-card-sub" style="margin-top:6px">Choose what you want to reset:</div>
+    </div>
+    <div class="reset-options">
+      <button class="reset-option selected" id="opt-chat" onclick="selectResetOption('chat')">
+        <svg class="reset-option-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+        </svg>
+        <div>
+          <div class="reset-option-label">Clear chat history</div>
+          <div class="reset-option-desc">Removes all messages but keeps your MCP connection and org ID</div>
+        </div>
+      </button>
+      <button class="reset-option" id="opt-session" onclick="selectResetOption('session')">
+        <svg class="reset-option-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 12a9 9 0 101.8-5.4M3 3v5h5"/>
+        </svg>
+        <div>
+          <div class="reset-option-label">Reset session</div>
+          <div class="reset-option-desc">Clears chat + creates a fresh server session (new memory)</div>
+        </div>
+      </button>
+      <button class="reset-option" id="opt-full" onclick="selectResetOption('full')">
+        <svg class="reset-option-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/><path d="M4.93 4.93l14.14 14.14"/>
+        </svg>
+        <div>
+          <div class="reset-option-label">Full reset</div>
+          <div class="reset-option-desc">Clears everything including saved credentials — you'll need to reconnect</div>
+        </div>
+      </button>
+    </div>
+    <div class="reset-btns">
+      <button class="reset-cancel-btn" onclick="closeResetModal()">Cancel</button>
+      <button class="reset-confirm-btn" onclick="executeReset()">Reset</button>
     </div>
   </div>
 </div>
@@ -407,11 +540,29 @@
         </div>
       </div>
     </div>
-    <div class="sidebar-section">In conversation</div>
+
+    <div class="sidebar-actions">
+      <button class="sidebar-btn accent-btn" onclick="openResetModal()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+          <line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
+        </svg>
+        New chat
+      </button>
+      <button class="sidebar-btn" onclick="openSettings()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.07 4.93l-1.42 1.42M4.93 4.93l1.42 1.42M4.93 19.07l1.42-1.42M19.07 19.07l-1.42-1.42M12 2v2M12 20v2M2 12h2M20 12h2"/>
+        </svg>
+        Change connection
+      </button>
+    </div>
+
+    <div class="sidebar-section">Conversation</div>
     <div class="history-list" id="historyList"></div>
     <div class="sidebar-footer">
       <div class="status-row">
-        <div class="status-dot"></div>
+        <div class="status-dot" id="statusDot"></div>
         <span id="connectionStatus">Connected</span>
       </div>
       <div class="status-row">
@@ -432,7 +583,13 @@
         <div class="header-title"><em>Zoho Books</em> / AI Assistant</div>
       </div>
       <div class="header-right">
-        <span class="badge badge-model" id="modelBadge">gemini-2.5-flash</span>
+        <button class="header-reset-btn" onclick="openResetModal()" title="Reset chat">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 12a9 9 0 101.8-5.4M3 3v5h5"/>
+          </svg>
+          Reset
+        </button>
+        <span class="badge badge-model" id="modelBadge">gemini-2.5-pro</span>
         <span class="badge badge-tools" id="toolsBadge">— tools</span>
       </div>
     </div>
@@ -448,6 +605,14 @@
           </div>
           <div class="empty-title">What can I help with?</div>
           <div class="empty-sub">Ask me anything about your Zoho Books data — invoices, bills, contacts, payments, reports, and more.</div>
+          <div class="quick-prompts">
+            <button class="quick-prompt" onclick="usePrompt('Show me all unpaid invoices')">Unpaid invoices</button>
+            <button class="quick-prompt" onclick="usePrompt('Total revenue this month')">Revenue this month</button>
+            <button class="quick-prompt" onclick="usePrompt('Top 5 customers by invoice value')">Top customers</button>
+            <button class="quick-prompt" onclick="usePrompt('List all overdue bills')">Overdue bills</button>
+            <button class="quick-prompt" onclick="usePrompt('Net profit for this year')">Net profit</button>
+            <button class="quick-prompt" onclick="usePrompt('Show me all contacts')">All contacts</button>
+          </div>
         </div>
       </div>
     </div>
@@ -478,22 +643,31 @@
 
 <script>
 const API_BASE = window.location.origin;
-const PAGE_SIZE = 25; // rows per frontend page
+const PAGE_SIZE = 25;
+const COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
+
+// ── Cookie helpers ────────────────────────────────────────────────
+function setCookie(name, value, maxAge = COOKIE_MAX_AGE) {
+  document.cookie = `${name}=${encodeURIComponent(value)}; max-age=${maxAge}; path=/; SameSite=Lax`;
+}
+function getCookie(name) {
+  const match = document.cookie.split('; ').find(r => r.startsWith(name + '='));
+  return match ? decodeURIComponent(match.split('=')[1]) : null;
+}
+function deleteCookie(name) {
+  document.cookie = `${name}=; max-age=0; path=/`;
+}
 
 // ── State ────────────────────────────────────────────────────────
 let mcpUrl     = null;
 let orgId      = null;
 let sessionId  = null;
 let isStreaming = false;
+let resetChoice = 'chat'; // 'chat' | 'session' | 'full'
 
 // ── Per-table pagination state ────────────────────────────────────
-// Key: unique tableId string, Value: { allRows, cols, currentPage, isLoading, bubble }
 const tableStates = new Map();
-
-// ── Live-table tracking (for SSE streaming) ───────────────────────
-// Keyed by a unique ID assigned at table creation, NOT the DOM id="liveTable"
-// This fixes the second-query bug: we track by JS object reference, not DOM id
-let activeLiveTableId = null; // currently streaming table's key in tableStates
+let activeLiveTableId = null;
 
 // ── DOM ──────────────────────────────────────────────────────────
 const messagesEl    = document.getElementById('messagesEl');
@@ -503,6 +677,41 @@ const inputBox      = document.getElementById('inputBox');
 const sendBtn       = document.getElementById('sendBtn');
 const sessionDisp   = document.getElementById('sessionDisplay');
 const connStatus    = document.getElementById('connectionStatus');
+const statusDot     = document.getElementById('statusDot');
+
+// ── Cookie-based credential loading ──────────────────────────────
+function loadSavedCredentials() {
+  const savedMcp = getCookie('zbai_mcp_url');
+  const savedOrg = getCookie('zbai_org_id');
+
+  if (savedMcp) {
+    document.getElementById('mcpUrlInput').value = savedMcp;
+  }
+
+  if (savedMcp && savedOrg) {
+    // Both credentials saved — show notice and auto-proceed
+    const notice = document.getElementById('savedNotice');
+    notice.classList.remove('hidden');
+    document.getElementById('savedNoticeText').textContent =
+      `Saved: ${truncateUrl(savedMcp)} · Org ${savedOrg}`;
+  } else if (savedMcp) {
+    const notice = document.getElementById('savedNotice');
+    notice.classList.remove('hidden');
+    document.getElementById('savedNoticeText').textContent =
+      `MCP URL saved: ${truncateUrl(savedMcp)}`;
+  }
+
+  return { savedMcp, savedOrg };
+}
+
+function clearSavedCredentials() {
+  deleteCookie('zbai_mcp_url');
+  deleteCookie('zbai_org_id');
+  document.getElementById('mcpUrlInput').value = '';
+  document.getElementById('orgIdInput').value = '';
+  document.getElementById('savedNotice').classList.add('hidden');
+  showToast('Credentials cleared', 2000, 'success');
+}
 
 // ── Setup helpers ─────────────────────────────────────────────────
 function clearErr(n) {
@@ -544,12 +753,15 @@ async function connectMcp() {
       const d = await r.json();
       document.getElementById('modelBadge').textContent = d.model || 'gemini';
     }
+    setConnected(true);
   } catch {
-    if (connStatus) { connStatus.textContent = 'Server unreachable'; connStatus.style.color = 'var(--amber)'; }
+    setConnected(false);
   }
 
   mcpUrl = url;
   input.value = url;
+  // Save MCP URL to cookie
+  setCookie('zbai_mcp_url', url);
   document.getElementById('mcpUrlDisplay').textContent = truncateUrl(url);
   btnLoading(1, false, '');
 
@@ -560,6 +772,13 @@ async function connectMcp() {
   document.getElementById('panel1').classList.add('hidden');
   document.getElementById('panel2').classList.remove('hidden');
   document.getElementById('setupSubtitle').textContent = 'Enter your Organisation ID';
+
+  // Pre-fill org ID from cookie if available
+  const savedOrg = getCookie('zbai_org_id');
+  if (savedOrg) {
+    document.getElementById('orgIdInput').value = savedOrg;
+  }
+
   setTimeout(() => document.getElementById('orgIdInput').focus(), 80);
 }
 
@@ -569,17 +788,37 @@ function submitOrg() {
   if (!val) { showErr(2, 'Organisation ID is required.'); input.focus(); return; }
   if (!/^\d{4,}$/.test(val)) { showErr(2, 'Must be a numeric ID (e.g. 60065733225).'); input.focus(); return; }
   orgId = val;
+  // Save org ID to cookie
+  setCookie('zbai_org_id', orgId);
+
   document.getElementById('orgIdDisplay').textContent = orgId;
   btnLoading(2, true, 'Starting…');
   setTimeout(() => {
     document.getElementById('setupOverlay').classList.add('hidden');
     document.getElementById('shell').classList.add('visible');
-    if (connStatus.textContent !== 'Offline?') {
-      connStatus.textContent = 'Connected'; connStatus.style.color = 'var(--accent)';
-    }
+    setConnected(true);
     btnLoading(2, false, '');
     inputBox.focus();
   }, 280);
+}
+
+function openSettings() {
+  // Re-open setup modal with current values pre-filled
+  document.getElementById('setupOverlay').classList.remove('hidden');
+  document.getElementById('panel1').classList.remove('hidden');
+  document.getElementById('panel2').classList.add('hidden');
+  document.getElementById('pill1').classList.add('active');
+  document.getElementById('pill1').classList.remove('done');
+  document.getElementById('pill2').classList.remove('active');
+  document.getElementById('num1').textContent = '1';
+  document.getElementById('setupSubtitle').textContent = 'Connect your MCP server';
+  if (mcpUrl) document.getElementById('mcpUrlInput').value = mcpUrl;
+}
+
+function setConnected(ok) {
+  connStatus.textContent = ok ? 'Connected' : 'Offline?';
+  connStatus.style.color = ok ? 'var(--accent)' : 'var(--amber)';
+  statusDot.classList.toggle('offline', !ok);
 }
 
 function truncateUrl(url) {
@@ -587,12 +826,90 @@ function truncateUrl(url) {
   catch { return url.slice(0,28); }
 }
 
+// ── Reset Modal ───────────────────────────────────────────────────
+function openResetModal() {
+  resetChoice = 'chat';
+  document.querySelectorAll('.reset-option').forEach(el => el.classList.remove('selected'));
+  document.getElementById('opt-chat').classList.add('selected');
+  document.getElementById('resetModal').classList.remove('hidden');
+}
+
+function closeResetModal() {
+  document.getElementById('resetModal').classList.add('hidden');
+}
+
+function selectResetOption(choice) {
+  resetChoice = choice;
+  document.querySelectorAll('.reset-option').forEach(el => el.classList.remove('selected'));
+  document.getElementById(`opt-${choice}`).classList.add('selected');
+}
+
+async function executeReset() {
+  closeResetModal();
+
+  if (resetChoice === 'chat') {
+    // Just clear messages, keep session
+    clearMessages();
+    showToast('Chat cleared', 2000, 'success');
+  }
+  else if (resetChoice === 'session') {
+    // Delete server session + clear messages
+    if (sessionId) {
+      try {
+        await fetch(`${API_BASE}/session/${sessionId}`, { method: 'DELETE' });
+      } catch {}
+    }
+    sessionId = null;
+    sessionDisp.textContent = '—';
+    clearMessages();
+    showToast('Session reset — fresh start', 2000, 'success');
+  }
+  else if (resetChoice === 'full') {
+    // Delete session + clear cookies + clear messages + show setup
+    if (sessionId) {
+      try {
+        await fetch(`${API_BASE}/session/${sessionId}`, { method: 'DELETE' });
+      } catch {}
+    }
+    sessionId = null;
+    mcpUrl    = null;
+    orgId     = null;
+    clearSavedCredentials();
+    clearMessages();
+    sessionDisp.textContent = '—';
+    document.getElementById('orgIdDisplay').textContent = '—';
+    document.getElementById('mcpUrlDisplay').textContent = '';
+    // Reset setup modal to step 1
+    document.getElementById('mcpUrlInput').value = '';
+    document.getElementById('orgIdInput').value  = '';
+    openSettings();
+  }
+}
+
+function clearMessages() {
+  messagesInner.innerHTML = '';
+  messagesInner.appendChild(emptyState);
+  emptyState.style.display = '';
+  tableStates.clear();
+  activeLiveTableId = null;
+}
+
+// ── Quick prompts ─────────────────────────────────────────────────
+function usePrompt(text) {
+  inputBox.value = text;
+  autoResize(inputBox);
+  inputBox.focus();
+  sendMessage();
+}
+
 // ── Chat helpers ─────────────────────────────────────────────────
 const escHtml = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 const sid6    = s => s ? s.slice(-6) : '—';
 
-function showToast(msg, d=4000) {
-  const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show');
+function showToast(msg, d=4000, type='error') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
   setTimeout(() => t.classList.remove('show'), d);
 }
 function scrollBottom() { messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' }); }
@@ -653,15 +970,10 @@ function renderResult(bubble, result) {
 }
 
 // ── Paginated Table ───────────────────────────────────────────────
-
 function genTableId() {
   return 'tbl_' + Math.random().toString(36).slice(2, 10);
 }
 
-/**
- * Create a new paginated table in the given bubble from structured data.
- * Returns the tableId so callers can register it as the live-streaming table.
- */
 function renderPagedTable(bubble, s, tableId) {
   tableId = tableId || genTableId();
   const cols = s.columns || [];
@@ -670,15 +982,9 @@ function renderPagedTable(bubble, s, tableId) {
   const footer = s.footer || '';
   const isLoading = !!s.__more_pages__;
 
-  // Store state
   tableStates.set(tableId, {
-    allRows: rows.slice(),   // copy — will grow as table_append arrives
-    cols,
-    currentPage: 1,
-    isLoading,
-    bubble,
-    title,
-    footer,
+    allRows: rows.slice(),
+    cols, currentPage: 1, isLoading, bubble, title, footer,
   });
 
   bubble.dataset.tableId = tableId;
@@ -686,7 +992,6 @@ function renderPagedTable(bubble, s, tableId) {
   return tableId;
 }
 
-/** Full DOM re-render for a paginated table (called on page change or new rows) */
 function _renderTableDOM(tableId) {
   const st = tableStates.get(tableId);
   if (!st) return;
@@ -695,7 +1000,7 @@ function _renderTableDOM(tableId) {
   const totalRows  = allRows.length;
   const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
   const page       = Math.min(currentPage, totalPages);
-  st.currentPage   = page; // clamp in case rows grew
+  st.currentPage   = page;
 
   const startIdx = (page - 1) * PAGE_SIZE;
   const pageRows = allRows.slice(startIdx, startIdx + PAGE_SIZE);
@@ -705,7 +1010,6 @@ function _renderTableDOM(tableId) {
     `<tr>${r.map(c => `<td>${styleCell(String(c))}</td>`).join('')}</tr>`
   ).join('');
 
-  // Build loading pill or footer text
   const loadingPill = isLoading
     ? `<span class="table-loading-pill"><span class="table-loading-dot"></span><span class="table-loading-dot"></span><span class="table-loading-dot"></span>loading more</span>`
     : '';
@@ -729,19 +1033,17 @@ function _renderTableDOM(tableId) {
   `;
 }
 
-/** Build the pagination bar HTML */
 function _buildPaginationBar(tableId, currentPage, totalPages, totalRows, isLoading) {
   const start = (currentPage - 1) * PAGE_SIZE + 1;
   const end   = Math.min(currentPage * PAGE_SIZE, totalRows);
 
-  // Page number buttons: show window of 5 around current
   let pageNums = '';
-  const window = 2;
+  const win = 2;
   for (let p = 1; p <= totalPages; p++) {
-    if (p === 1 || p === totalPages || (p >= currentPage - window && p <= currentPage + window)) {
+    if (p === 1 || p === totalPages || (p >= currentPage - win && p <= currentPage + win)) {
       const isActive = p === currentPage ? ' active' : '';
       pageNums += `<button class="page-btn${isActive}" onclick="gotoPage('${tableId}',${p})">${p}</button>`;
-    } else if (p === currentPage - window - 1 || p === currentPage + window + 1) {
+    } else if (p === currentPage - win - 1 || p === currentPage + win + 1) {
       pageNums += `<span class="page-dots">…</span>`;
     }
   }
@@ -766,24 +1068,15 @@ function _buildPaginationBar(tableId, currentPage, totalPages, totalRows, isLoad
   `;
 }
 
-/** Called by pagination button clicks */
 function gotoPage(tableId, page) {
   const st = tableStates.get(tableId);
   if (!st) return;
   const totalPages = Math.ceil(st.allRows.length / PAGE_SIZE);
   st.currentPage = Math.max(1, Math.min(page, totalPages));
   _renderTableDOM(tableId);
-  // Scroll the bubble into view smoothly
   st.bubble.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
-// ── Live streaming table append (table_append / table_complete) ───
-
-/**
- * Append rows to the currently-streaming live table.
- * Uses activeLiveTableId (a JS string key), NOT a DOM id.
- * This fixes the second-query bug completely.
- */
 function liveTableAppend(rows, totalSoFar, hasMore) {
   if (!activeLiveTableId) return;
   const st = tableStates.get(activeLiveTableId);
@@ -792,13 +1085,11 @@ function liveTableAppend(rows, totalSoFar, hasMore) {
   st.allRows.push(...rows);
   st.isLoading = hasMore;
 
-  // Only re-render if user is on the last page (so we don't jump their view)
   const totalPages = Math.max(1, Math.ceil(st.allRows.length / PAGE_SIZE));
   const isOnLastPage = st.currentPage >= totalPages - 1;
   if (isOnLastPage) {
     _renderTableDOM(activeLiveTableId);
   } else {
-    // Just update the loading indicator and count without re-rendering the table
     _updateTableFooter(activeLiveTableId);
   }
   scrollBottom();
@@ -815,7 +1106,6 @@ function liveTableComplete(total) {
   activeLiveTableId = null;
 }
 
-/** Lightweight footer/count update without full re-render */
 function _updateTableFooter(tableId) {
   const st = tableStates.get(tableId);
   if (!st) return;
@@ -947,7 +1237,6 @@ async function streamChat(message) {
   const reader = resp.body.getReader(), dec = new TextDecoder();
   let buf = '', streamDiv = null, streamSpan = null, streamText = '', t0 = Date.now();
 
-  // Reset live table tracking for this new query
   activeLiveTableId = null;
 
   while (true) {
@@ -959,7 +1248,6 @@ async function streamChat(message) {
       const line = part.trim(); if (!line.startsWith('data:')) continue;
       let evt; try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
 
-      // ── token: stream text chars ──────────────────────────────
       if (evt.type === 'token') {
         if (!streamDiv) {
           streamDiv  = createStreamingBubble();
@@ -970,10 +1258,14 @@ async function streamChat(message) {
         scrollBottom();
       }
 
-      // ── done: final render ────────────────────────────────────
       else if (evt.type === 'done') {
         const elapsed = Date.now() - t0;
-        if (evt.session_id) { sessionId = evt.session_id; sessionDisp.textContent = sid6(sessionId); }
+        if (evt.session_id) {
+          sessionId = evt.session_id;
+          sessionDisp.textContent = sid6(sessionId);
+          // Save session_id is intentionally NOT persisted to cookies —
+          // sessions are server-side and expire; only mcp_url + org_id are saved.
+        }
 
         const structured = evt.structured;
 
@@ -986,54 +1278,40 @@ async function streamChat(message) {
           if (meta) meta.innerHTML = `<span>${time}</span><span class="elapsed">${elapsed}ms</span>${tools?`<div class="msg-tools">${tools}</div>`:''}`;
 
           if (structured && structured.format === 'table') {
-            // ── PAGINATED TABLE PATH ──────────────────────────────
             bubble.innerHTML = '';
             bubble.classList.add('has-table');
-            // FIX: generate a fresh tableId for each query.
-            // The old code used id="liveTable" on the DOM, which meant
-            // the second query would find the first query's stale table.
-            // Now each table gets a unique JS key, fully decoupled from DOM ids.
             const newTableId = genTableId();
             renderPagedTable(bubble, structured, newTableId);
-
-            // Register as active live table ONLY if more pages are coming
             if (structured.__more_pages__) {
               activeLiveTableId = newTableId;
             }
           } else {
-            // Non-table: render normally
             renderResult(bubble, {type:'reply', structured, reply: streamText});
           }
         }
         scrollBottom();
       }
 
-      // ── table_append: more rows streamed in ───────────────────
       else if (evt.type === 'table_append') {
-        // Uses activeLiveTableId (set in 'done' handler above), not a DOM id.
-        // This is the core fix for the second-query bug.
         liveTableAppend(evt.rows || [], evt.total_so_far, evt.has_more);
         scrollBottom();
       }
 
-      // ── table_complete: pagination finished ───────────────────
       else if (evt.type === 'table_complete') {
         liveTableComplete(evt.total);
       }
 
-      // ── confirm ───────────────────────────────────────────────
       else if (evt.type === 'confirm') {
         if (evt.session_id) { sessionId = evt.session_id; sessionDisp.textContent = sid6(sessionId); }
         replaceBotMsg({type:'confirm', confirm_text: evt.confirm_text}, [], Date.now()-t0);
       }
 
-      // ── error ─────────────────────────────────────────────────
       else if (evt.type === 'error') {
         const msg = evt.message || 'Unknown error';
         const isMcpError = msg.toLowerCase().includes('mcp') || msg.toLowerCase().includes('connect')
                         || msg.toLowerCase().includes('502') || msg.toLowerCase().includes('server');
         replaceBotMsg({type:'error', reply: isMcpError
-          ? '⚠️ ' + msg + '\n\nCheck that your MCP server is running and the URL is correct, then reload the page to reconnect.'
+          ? '⚠️ ' + msg + '\n\nCheck that your MCP server is running and the URL is correct, then use "Change connection" to reconnect.'
           : msg
         }, [], Date.now()-t0);
         showToast(msg, 6000);
@@ -1043,8 +1321,38 @@ async function streamChat(message) {
 }
 
 // ── Init ─────────────────────────────────────────────────────────
-document.getElementById('mcpUrlInput').focus();
+(function init() {
+  const { savedMcp, savedOrg } = loadSavedCredentials();
+
+  if (savedMcp && savedOrg) {
+    // Auto-proceed with saved credentials
+    mcpUrl = savedMcp;
+    orgId  = savedOrg;
+    document.getElementById('orgIdDisplay').textContent = orgId;
+    document.getElementById('mcpUrlDisplay').textContent = truncateUrl(mcpUrl);
+
+    // Skip setup modal, go straight to chat
+    document.getElementById('setupOverlay').classList.add('hidden');
+    document.getElementById('shell').classList.add('visible');
+
+    // Verify server is reachable
+    fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(5000) })
+      .then(r => r.json())
+      .then(d => {
+        setConnected(true);
+        if (d.model) document.getElementById('modelBadge').textContent = d.model;
+      })
+      .catch(() => setConnected(false));
+
+    setTimeout(() => inputBox.focus(), 100);
+  } else if (savedMcp) {
+    // MCP URL saved but no org — go straight to step 2 of setup
+    connectMcp();
+  } else {
+    // Fresh start — focus MCP input
+    setTimeout(() => document.getElementById('mcpUrlInput').focus(), 100);
+  }
+})();
 </script>
 </body>
 </html>
-
