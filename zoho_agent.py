@@ -1126,13 +1126,33 @@ async def _autopaginate(
     audit: "AuditLog",
     correlation_id: str,
 ) -> Any:
-    record_key, all_records = _extract_records(first_result)
-    if not record_key or not all_records:
+    record_key, page1_records = _extract_records(first_result)
+    if not record_key or not page1_records:
         return first_result
 
+    # IMPORTANT: copy page-1 records so we never mutate the original list.
+    # Mutating in-place causes duplicates when the same result object is
+    # referenced from all_step_results and processed again.
+    all_records: list = list(page1_records)
+
+    # Track IDs we've already seen to deduplicate across pages.
+    _ID_FIELDS = ("invoice_id", "bill_id", "contact_id", "item_id",
+                  "payment_id", "expense_id", "estimate_id",
+                  "salesorder_id", "purchaseorder_id", "creditnote_id",
+                  "transaction_id", "journal_id")
+    seen_ids: set = set()
+    for rec in all_records:
+        if isinstance(rec, dict):
+            for f in _ID_FIELDS:
+                v = rec.get(f)
+                if v:
+                    seen_ids.add(v)
+                    break
+
     page = 2
+    page_result: Any = first_result
     while page <= MAX_AUTOPAGINATE_PAGES:
-        if not _has_more_pages(first_result if page == 2 else page_result):  # type: ignore[possibly-undefined]
+        if not _has_more_pages(page_result):
             break
 
         page_args = {**base_args, "page": page}
@@ -1155,16 +1175,55 @@ async def _autopaginate(
         _, page_records = _extract_records(page_result)
         if not page_records:
             break
-        all_records.extend(page_records)
+
+        # Deduplicate by ID and number fields.
+        # Critical: if Zoho returns the same records on every page (can happen
+        # when MCP filters server-side and has_more_page is still True),
+        # new_records will be empty and we break out immediately.
+        new_records = []
+        for rec in page_records:
+            if not isinstance(rec, dict):
+                continue
+            rec_id = None
+            for f in _ID_FIELDS:
+                v = rec.get(f)
+                if v:
+                    rec_id = v
+                    break
+            if not rec_id:
+                for f in ("invoice_number", "bill_number", "number",
+                          "creditnote_number", "estimate_number",
+                          "salesorder_number", "purchaseorder_number"):
+                    v = rec.get(f)
+                    if v:
+                        rec_id = f"num:{v}"
+                        break
+            if rec_id:
+                if rec_id not in seen_ids:
+                    seen_ids.add(rec_id)
+                    new_records.append(rec)
+            else:
+                new_records.append(rec)  # no dedup key — include it
+
+        if not new_records:
+            # This page contained only records we've already seen — stop.
+            log.info("autopaginate_no_new_records", extra={
+                "tool": tool_name, "page": page, "cid": correlation_id
+            })
+            break
+
+        all_records.extend(new_records)
         audit.write("tool_paginated", tool=tool_name, page=page,
-                    records=len(page_records), cid=correlation_id)
+                    records=len(new_records), cid=correlation_id)
         page += 1
 
-    merged = dict(first_result)
+    # Build a fresh result dict — do NOT reuse first_result to avoid
+    # mutating shared state
+    merged = {k: v for k, v in first_result.items() if k != record_key}
     merged[record_key] = all_records
-    if "page_context" in merged and isinstance(merged["page_context"], dict):
+    if "page_context" in first_result and isinstance(first_result["page_context"], dict):
         merged["page_context"] = {
-            **merged["page_context"],
+            **first_result["page_context"],
             "has_more_page": False,
             "total": len(all_records),
         }
