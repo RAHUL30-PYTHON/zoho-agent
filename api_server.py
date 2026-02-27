@@ -866,18 +866,35 @@ def _python_filter_records(records: list, user_question: str) -> list:
 
     if candidate_words:
         best_name = ""
+        # for length in range(min(6, len(candidate_words)), 0, -1):
+        #     for start in range(len(candidate_words) - length + 1):
+        #         chunk = " ".join(candidate_words[start:start + length])
+        #         for rec in records[:100]:
+        #             if not isinstance(rec, dict):
+        #                 continue
+        #             for nf in _NAME_FIELDS:
+        #                 val = str(rec.get(nf, "")).lower()
+        #                 if chunk in val and len(chunk) > len(best_name):
+        #                     best_name = chunk
+        #         if best_name:
+        #             break
+        all_name_values: list[str] = []
+        for rec in records:
+            if isinstance(rec, dict):
+                for nf in _NAME_FIELDS:
+                    val = str(rec.get(nf, "")).lower()
+                    if val:
+                        all_name_values.append(val)
+
         for length in range(min(6, len(candidate_words)), 0, -1):
             for start in range(len(candidate_words) - length + 1):
                 chunk = " ".join(candidate_words[start:start + length])
-                for rec in records[:100]:
-                    if not isinstance(rec, dict):
-                        continue
-                    for nf in _NAME_FIELDS:
-                        val = str(rec.get(nf, "")).lower()
-                        if chunk in val and len(chunk) > len(best_name):
-                            best_name = chunk
+                for val in all_name_values:
+                    if chunk in val and len(chunk) > len(best_name):
+                        best_name = chunk
                 if best_name:
                     break
+           
             if best_name:
                 break
 
@@ -1723,3 +1740,4 @@ BASE_DIR = Path(__file__).resolve().parent
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return FileResponse(BASE_DIR / "favicon.ico", media_type="image/x-icon")
+
